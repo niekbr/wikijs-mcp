@@ -1,0 +1,38 @@
+# Lokale Wiki.js 2.5 voor de spikes van fase 0 en de verificatie in fase 7.
+# Niet voor productie: vaste wachtwoorden, geen TLS.
+#
+#   docker compose -f deploy/dev/docker-compose.yml up -d
+#   .venv/bin/python scripts/spike_setup.py
+#
+# Wiki.js draait daarna op http://127.0.0.1:3080
+
+name: wikijs-mcp-dev
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: wiki
+      POSTGRES_USER: wikijs
+      POSTGRES_PASSWORD: wikijsrocks
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  wiki:
+    image: ghcr.io/requarks/wiki:2.5
+    depends_on:
+      - db
+    environment:
+      DB_TYPE: postgres
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: wikijs
+      DB_PASS: wikijsrocks
+      DB_NAME: wiki
+    ports:
+      - "127.0.0.1:3080:3000"
+    restart: unless-stopped
+
+volumes:
+  db-data:

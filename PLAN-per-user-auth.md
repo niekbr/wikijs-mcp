@@ -130,8 +130,9 @@ De dev-omgeving blijft bruikbaar voor de tests van de volgende fases en voor fas
   - `strategy_key`
   - `db_path`
   - `encryption_key` (Fernet, uit een omgevingsvariabele)
-  - `default_locale` (optioneel; anders uit `localization.config`, en `en` als dat
-    niet lukt)
+  - `default_locale` (optioneel; anders uit `localization.config`, dat werkt voor
+    iedereen)
+  - `html_timeout` (standaard 10 s, voor de route `/s/`)
   - `token_renewal` (gelijk aan de waarde in Wiki.js, standaard `14d`)
   - `session_max_age` (standaard `30d`), `pat_default_ttl` (standaard `90d`) en
     `pat_max_ttl`
@@ -141,41 +142,89 @@ De dev-omgeving blijft bruikbaar voor de tests van de volgende fases en voor fas
 
 **`client.py`**
 - `WikiJSClient(config, jwt: str, on_new_jwt: Callable[[str], Awaitable[None]] | None)`.
+
+**GraphQL-aanroepen**
 - `_execute_query` stuurt `Authorization: Bearer <jwt>` en **precies**
   `Content-Type: application/json`, zonder charset. Een test moet dit vastleggen.
-- Herken verlopen tokens zelf, want Wiki.js valt stil terug op Guest:
-  - Lees vóór elk verzoek `exp` uit de payload. Een handtekeningcontrole is niet nodig,
-    want Wiki.js controleert. Is `exp + token_renewal < now`, gooi dan meteen
-    `WikiAuthExpired` en doe geen verzoek.
-  - Was de token verlopen (`exp < now`) en komt er geen nieuwe token terug, gooi dan
-    `WikiAuthExpired` en **gooi het resultaat weg**. Dat resultaat kwam namelijk van
-    de Guest-gebruiker.
-- Vernieuwen: lees `new-jwt`, en bij verzoeken die geen JSON zijn (de HTML-fallback)
-  ook `Set-Cookie: jwt=`. Roep dan `on_new_jwt` aan en gebruik de nieuwe JWT voor
-  volgende aanroepen op dezelfde client.
-- Nieuwe exceptions in `wikijs_mcp/errors.py`:
-  - `WikiAuthExpired`: zoals hierboven, of HTTP 401
-  - `WikiForbidden`: Wiki.js weigert de actie (met de codes en berichten uit fase 0,
-    punt 9)
-  - `WikiError`: al het andere. Vervang hiermee de generieke `Exception`s, ook in
-    `create_page`, `update_page`, `delete_page` en `move_page`.
-- **Locale:** haal de hardcoded `"en"` weg in `search_pages`, `get_page_by_path`,
-  `get_page_tree`, `create_page` en `move_page`. Gebruik de opgegeven locale, en anders
-  `default_locale`. Bepaal die één keer per proces en cache hem.
-- **Zoeken:** geef **geen `id`** meer door uit zoekresultaten, alleen `path` en `locale`.
-- **Een pad omzetten naar een id:** maak `resolve_page_id(path, locale)`. Gebruik
-  `singleByPath` met alleen metadata als fase 0 liet zien dat dat werkt voor gewone
-  gebruikers, en anders `pages.tree` of `pages.list`. History, version en de
-  schrijftools gebruiken deze functie.
-- **De huidige pagina ophalen:** `get_page_by_id` en `update_page` gebruiken nu
-  `pages.single`. Vervang dat door wat in fase 0, punt 2 is gekozen. Dat is waarschijnlijk
-  `singleByPath` of de route `/s/`. Anders kan een schrijver zonder `manage:pages`
-  niets bijwerken.
-- Alleen als de gerenderde fallback nodig is: voeg `get_page_rendered(path, locale)`
-  toe. Die haalt het inhoudsdeel uit de HTML en zet het om naar Markdown met
-  `markdownify`.
-- Nieuw: `get_profile()` via `users { profile { id name email groups … } }`. Die
-  gebruik je in fase 4 bij de callback en voor `wiki_whoami`.
+
+**Verlopen of ingetrokken tokens herkennen.** Wiki.js valt stil terug op Guest, dus de
+client moet dit zelf doen:
+- Lees vóór elk verzoek `exp` uit de payload. Een handtekeningcontrole is niet nodig,
+  want Wiki.js controleert. Is `exp + token_renewal < now`, gooi dan meteen
+  `WikiAuthExpired` en doe geen verzoek.
+- Was de token verlopen (`exp < now`) en komt er geen nieuwe token terug, gooi dan
+  `WikiAuthExpired` en **gooi het resultaat weg**. Dat kwam namelijk van Guest.
+- GraphQL-fout `"Unauthorized"` (zonder code) of code 1019 bij een JWT die nog niet
+  verlopen is: de gebruiker is ingetrokken of gedeactiveerd. Gooi dan
+  `WikiAuthRevoked`.
+
+**Vernieuwen**
+- Lees `new-jwt`, en bij HTML-verzoeken `Set-Cookie: jwt=`. Roep dan `on_new_jwt` aan
+  en gebruik de nieuwe JWT voor volgende aanroepen op dezelfde client.
+
+**Exceptions** (nieuw in `wikijs_mcp/errors.py`):
+- `WikiAuthExpired`: de sessie is verlopen; de gebruiker moet opnieuw inloggen
+- `WikiAuthRevoked`: de gebruiker is ingetrokken of gedeactiveerd in Wiki.js
+- `WikiForbidden`: 6013, 6012, 6007, `"Forbidden"` van `@auth`, en een 403 van `/s/`
+- `WikiNotFound`: 6003, en een 302 van `/s/`
+- `WikiError`: al het andere. Vervang hiermee de generieke `Exception`s, ook in
+  `create_page`, `update_page`, `delete_page` en `move_page`.
+
+**Locale**
+- Haal de hardcoded `"en"` weg in `search_pages`, `get_page_by_path`, `get_page_tree`,
+  `create_page` en `move_page`.
+- Gebruik de opgegeven locale, anders `default_locale` uit de config, anders
+  `localization.config`. Cache die waarde per proces.
+
+**Zoeken**
+- Vraag alleen `results { title description path locale }` op.
+- **Geen `id`, `totalHits` of `suggestions`**: die lekken informatie over verboden
+  pagina's (fase 0, punt 3).
+
+**Pagina-inhoud via de bronroute**
+- Maak `get_page_source(path, locale, version_id=None)`. Die doet `GET /s/<locale>/<pad>`
+  (met `?v=` voor een oude versie) met de bearer-header, `html_timeout` en zonder
+  redirects te volgen. De functie haalt uit de HTML:
+  - de Markdown: `html.unescape` van `<code v-pre>…</code>`
+  - `page_id` uit `:page-id`
+  - de effectieve rechten: base64-JSON uit `effective-permissions`
+  - de titel en beschrijving uit `<title>`/meta, als die nodig zijn
+- Statuscodes:
+
+  | Antwoord | Betekenis |
+  |---|---|
+  | 200 | ok |
+  | 403 | `WikiForbidden`, met de tekst "je hebt `read:source` nodig voor `<pad>`" |
+  | 302 | `WikiNotFound` |
+  | timeout of 500 | controleer met `get_profile()`: een fout betekent `WikiAuthRevoked`, anders `WikiError` |
+
+- `get_page_by_path` en `get_page_by_id` (via `pages.single`/`singleByPath`)
+  **vervallen**. Metadata (titel, beschrijving, tags, datums, `isPublished`) komt uit
+  `pages.list`, en het page-id uit `/s/`.
+
+**Een pad omzetten naar een id**
+- `resolve_page_id(path, locale)` gebruikt het `page_id` uit `/s/`. Is dat er niet,
+  dan zoekt hij in `pages.list` (bevat id en pad).
+- History, version en de schrijftools gebruiken deze functie. Zo bestaat een id
+  altijd, en lekt de TypeError die Wiki.js geeft bij een onbekend id in `history`
+  niet.
+- `get_page_meta(id | path)` haalt de metadata uit `pages.list`. Dat geeft alle
+  pagina's terug waar de gebruiker bij mag; cache het resultaat per client.
+
+**Update veilig maken**
+- `update_page` stuurt altijd `title`, `description`, `tags` en `isPublished` mee,
+  met de huidige waarden uit `get_page_meta`.
+- Heeft de JWT `write:styles` of `write:scripts` (globale `permissions`), probeer dan
+  eerst de huidige `scriptCss` en `scriptJs` op te halen via `singleByPath`. Dat lukt
+  alleen met `manage:pages`. Lukt het niet, **weiger de update** met een duidelijke
+  melding, want Wiki.js zou de CSS en JS van de pagina wissen.
+- Publicatiedata (`publishStartDate`/`publishEndDate`) gaan verloren. Die zijn niet te
+  lezen zonder `manage:pages`. Zet dit in de README als bekende beperking.
+
+**Profiel**
+- Nieuw: `get_profile()` via `users { profile { id name email groups } }`. Die
+  gebruik je in fase 4 bij de callback, voor `wiki_whoami` en om in te trekken tokens
+  te herkennen.
 
 **Tests:** pas `tests/conftest.py`, `test_client.py`, `test_config.py` en
 `test_graphql_compatibility.py` aan op de nieuwe constructor. Nieuwe tests:
@@ -184,7 +233,13 @@ De dev-omgeving blijft bruikbaar voor de tests van de volgende fases en voor fas
   `WikiAuthExpired`
 - een verlopen JWT zonder nieuwe token geeft `WikiAuthExpired`, en het resultaat
   wordt weggegooid
-- 401 en 403 worden herkend
+- `"Unauthorized"` en 1019 geven `WikiAuthRevoked`; 6013, 6012, 6007 en `"Forbidden"`
+  geven `WikiForbidden`; 6003 geeft `WikiNotFound`
+- `/s/` parsen (Markdown met HTML-entities, page-id, effectieve rechten), en de
+  statuscodes 403, 302, timeout en 500
+- de search-query vraagt geen `id`, `totalHits` of `suggestions` op
+- `update_page` stuurt altijd `isPublished` en de huidige metadata mee, en weigert bij
+  `write:styles`/`write:scripts` zonder toegang tot de CSS/JS
 - de exacte `Content-Type`
 - geen `"en"` meer in de payload als er geen locale is opgegeven
 
@@ -263,6 +318,7 @@ tokens die blijven werken na opnieuw inloggen.
 - Foutafhandeling:
   - `WikiAuthExpired` wordt een tool-fout: "sessie verlopen, log opnieuw in via
     `<public_url>/mcp/login`". Trek het token niet in.
+  - `WikiAuthRevoked` wordt "je account is ingetrokken of gedeactiveerd in de wiki".
   - `WikiForbidden` wordt "geen toegang tot `<pad>`". Een "niet gevonden" en een
     "geen toegang" mogen er voor de gebruiker hetzelfde uitzien.
 - **Dev-modus:**
@@ -272,27 +328,43 @@ tokens die blijven werken na opnieuw inloggen.
   - `run_stdio` blijft alleen achter de vlag `--dev-jwt` voor lokaal testen.
 
 **Tools**
-- `wiki_search`: geen `id` meer in de uitvoer, alleen titel, `path`, `locale` en
-  beschrijving.
-- `wiki_get_page`: gebruik bij voorkeur het pad, met de manier van ophalen uit fase 0,
-  punt 2. Werkt een opgegeven `id` niet met `pages.single`, zet dat id dan eerst om
-  naar een pad.
-- `wiki_get_history` en `wiki_get_version`: accepteren een pad en locale, of een id.
-  Ze zetten het pad om naar een id met `resolve_page_id`.
-- `wiki_list_pages` en `wiki_get_tree` blijven, maar controleer dat ze gefilterd
-  worden. Gebruik de standaard-locale in plaats van `"en"`.
-- Nieuwe tool `wiki_whoami`: geeft gebruiker, groepen en **globale** rechten terug. Zeg
-  er in de uitvoer bij dat paginaregels hier niet in staan.
-- **Schrijftools** (`create`, `update`, `delete`, `move`) worden alleen geregistreerd
-  als `read_only=false`. Ze accepteren ook een pad, en Wiki.js handhaaft de rechten.
-  `wiki_create_page` gebruikt de standaard-locale uit de config als
-  `localization.config` niet werkt voor gewone gebruikers.
-- `wiki_get_site_info` en `wiki_list_tags`: werkt `site.config` niet voor gewone
-  gebruikers (fase 0, punt 8), laat dan alleen de velden zien die wel lukken.
-- Pas de `instructions` van `FastMCP` aan. Er mag niet meer staan "numeric ID (from
-  list/search results)" en "by numeric ID for mutations". Uitleg die er wel moet
-  staan: werk met paden; de server zoekt id's zelf op; zonder rechten lijkt een pagina
-  niet te bestaan.
+- `wiki_search`:
+  - toont alleen titel, `path`, `locale` en beschrijving
+  - geen `id`, `totalHits` of `suggestions`
+  - met een parameter `locale`
+- `wiki_get_page(path, locale=None, id=None, metadata_only=False, version_id=None)`:
+  - de inhoud komt via `get_page_source`, de metadata via `get_page_meta`
+  - een `id` wordt eerst via `pages.list` omgezet naar een pad
+  - zonder `read:source` krijgt de gebruiker een duidelijke melding; er is **geen
+    fallback** naar de gerenderde pagina
+  - `include_render` vervalt
+- `wiki_get_history` en `wiki_get_version`:
+  - accepteren een pad met locale, of een id; een pad wordt omgezet met
+    `resolve_page_id`
+  - `wiki_get_version` mag ook `/s/<pad>?v=<versionId>` gebruiken
+- `wiki_list_pages` en `wiki_get_tree` blijven; Wiki.js filtert ze al. Gebruik de
+  standaard-locale in plaats van `"en"`.
+- Nieuwe tool `wiki_whoami(path=None)`:
+  - geeft naam, e-mail en groepen (`users.profile`) en de **globale** rechten uit de
+    JWT
+  - met een `path` erbij: ook de **effectieve rechten voor die pagina** uit `/s/`
+    (lezen, schrijven, bron, history)
+- **Schrijftools** (`create`, `update`, `delete`, `move`):
+  - worden alleen geregistreerd als `read_only=false`
+  - accepteren ook een pad; Wiki.js handhaaft de rechten
+  - `wiki_update_page` (ook met `edits`) haalt de huidige inhoud uit `/s/` en
+    gebruikt de veilige update uit fase 1
+  - `wiki_move_page` en `wiki_delete_page` geven een nette melding als
+    `manage:pages`/`delete:pages` ontbreekt
+- `wiki_get_site_info`: `site.config` vraagt `manage:system`. Toon daarom de
+  `public_url` uit de config en `localization.config`.
+- `wiki_list_tags`: blijft; Wiki.js filtert al.
+- Pas de `instructions` van `FastMCP` aan. Weg moet: "numeric ID (from list/search
+  results)" en "by numeric ID for mutations". Erbij moet:
+  - werk met paden; de server zoekt id's zelf op
+  - een pagina waar je geen recht op hebt, lijkt niet te bestaan
+  - pagina's lezen vraagt het recht `read:source`
+  - `wiki_whoami` laat zien wat je mag
 
 **Auditlog:** per tool-call één gestructureerde logregel met `wiki_user_id`, e-mail,
 tool, pad of zoekterm en ok/denied/expired/error. Log nooit tokens of pagina-inhoud.
@@ -418,24 +490,34 @@ Pas doen als de gebruiker dat wil, bijvoorbeeld voor claude.ai of Claude Desktop
 
 ## Fase 7: verificatie (verplicht voor oplevering)
 
-Automatiseer waar het kan, met de lokale testaccounts uit fase 0.
+Automatiseer waar het kan, met de dev-wiki en de testaccounts uit fase 0
+(`scripts/spike_setup.py`: lezer A, B en C, een schrijver, en Guest met alleen
+`publiek/`). Zet voor punt 2 tijdelijk de `postgres`-engine aan in de dev-wiki, zodat
+het lek via `suggestions` en `totalHits` ook getest wordt.
 
-1. Maak twee testgebruikers in verschillende groepen en een pagina die alleen gebruiker
-   A mag zien.
-2. Doorloop voor beide gebruikers zoeken, lijsten, de boom, ophalen op pad en ophalen
-   op id, en history en version. Gebruiker B mag de pagina **nergens** zien, ook niet
-   in zoeksnippets of beschrijvingen.
-3. Een gebruiker met alleen leesrechten kan pagina's lezen via `wiki_get_page`.
-4. Zijn de schrijftools aan, dan kan een schrijver zonder `manage:pages` een pagina
-   bijwerken (ook met `edits`), aanmaken en verplaatsen.
+1. De testgebruikers en testpagina's uit `spike_setup.py`. `geheim/plan` is verboden
+   voor B.
+2. Doorloop voor A en B zoeken, lijsten, de boom, tags, ophalen op pad en ophalen op
+   id, en history en version. B mag `geheim/plan` **nergens** zien: niet in
+   zoekresultaten, niet in aantallen en niet in suggesties.
+3. Lezer A (met `read:source`) kan pagina's lezen via `wiki_get_page`. Lezer C (zonder
+   `read:source`) krijgt een duidelijke melding over `read:source`.
+4. Zijn de schrijftools aan:
+   - de schrijver zonder `manage:pages` kan een pagina bijwerken (ook met `edits`) en
+     aanmaken
+   - `isPublished`, titel, beschrijving en tags blijven gelijk als ze niet zijn
+     opgegeven
+   - verplaatsen en verwijderen geven een nette melding
 5. Verloop van tokens, met een korte `tokenExpiration`:
    - de vernieuwing werkt
    - twee parallelle tool-calls met een verlopen JWT werken allebei, en de opgeslagen
      JWT gaat daarna niet terug naar een oudere
    - na de vernieuwingstermijn komt er een duidelijke "log opnieuw in"-melding en
      **geen** resultaat als Guest
-6. Deactiveer gebruiker A in Wiki.js: de sessie stopt daarna met werken. Noteer na
-   hoeveel tijd (meteen, of na `tokenExpiration`).
+6. Deactiveer gebruiker A in Wiki.js: de volgende tool-call geeft meteen de melding
+   "ingetrokken" (fase 0 zag `"Unauthorized"`). Dat moet ook gelden voor
+   `wiki_get_page`, waar `/s/` blijft hangen. Wordt A weer geactiveerd, dan werkt de
+   sessie weer.
 7. Trek een persoonlijk token in: de volgende aanroep geeft een 401. Een token waarvan
    `expires_at` verstreken is, geeft ook een 401.
 8. Log opnieuw in via `/mcp/login`: bestaande tokens blijven werken. Zet
@@ -460,13 +542,26 @@ Automatiseer waar het kan, met de lokale testaccounts uit fase 0.
   en het MCP-endpoint.
 - Een resultaat dat als Guest is opgehaald, komt nooit bij de gebruiker terecht (zie
   fase 1).
+- `totalHits` en `suggestions` uit `pages.search` worden nooit opgevraagd of
+  doorgegeven.
+- Een update via MCP mag nooit stil gegevens wissen: `isPublished` en de huidige
+  metadata worden altijd meegestuurd, en bij `write:styles`/`write:scripts` weiger je
+  de update als de CSS/JS niet te lezen zijn.
 - Geen "raw GraphQL"-tool toevoegen.
+
+## Beantwoord
+
+- Zoek-engine op productie: `postgres`.
+- Pagina's lezen: alleen via `/s/`; `read:source` is verplicht, zonder fallback.
+- Testomgeving: lokale docker (`deploy/dev`), testaccounts via de local strategy.
 
 ## Open vragen voor de gebruiker
 
-- Wiki.js-versie (precies) en de strategy key van de OIDC-login?
+- Wiki.js-versie op productie (precies) en de strategy key van de OIDC-login?
 - Welke waarden staan nu ingesteld voor `tokenExpiration` en `tokenRenewal`?
-- Is de local strategy beschikbaar voor testaccounts (handig voor fase 0 en 7)?
+- Hebben de groepen op productie die moeten lezen al `read:source`?
+- Hebben gebruikers op productie `write:styles` of `write:scripts`? Dan weigeren
+  updates via MCP voor hen, tenzij ze ook `manage:pages` hebben.
 - Welke reverse proxy (nginx, Traefik, Caddy)?
 - Alleen lezen, of moeten schrijftools ook beschikbaar zijn?
 - Alleen persoonlijke tokens (fase 4), of ook OAuth voor custom connectors (fase 5)?

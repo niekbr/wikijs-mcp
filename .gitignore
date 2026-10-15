@@ -149,3 +149,6 @@ Thumbs.db
 
 # Bandit security reports
 bandit-report.json
+# Fase 0 spikes: lokale testaccounts en uitvoer
+scripts/.env.spike
+scripts/out/
