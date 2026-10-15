@@ -554,14 +554,20 @@ het lek via `suggestions` en `totalHits` ook getest wordt.
 - Zoek-engine op productie: `postgres`.
 - Pagina's lezen: alleen via `/s/`; `read:source` is verplicht, zonder fallback.
 - Testomgeving: lokale docker (`deploy/dev`), testaccounts via de local strategy.
+- Productie (2026-10-15):
+  - de leesgroepen hebben `read:source`, zowel in de globale rechten als in de
+    paginaregels
+  - `write:styles` en `write:scripts` staan bij geen enkele groep aan, dus de weigering
+    bij een update komt in de praktijk niet voor. Hij blijft als vangnet.
+  - `manage:pages` wordt via paginaregels per onderdeel gegeven (bijvoorbeeld
+    `START committees/acci`). Wiki.js controleert `move` per pad, dus die beheerders
+    kunnen binnen hun eigen onderdeel verplaatsen. `delete` vraagt apart
+    `delete:pages`.
 
 ## Open vragen voor de gebruiker
 
 - Wiki.js-versie op productie (precies) en de strategy key van de OIDC-login?
 - Welke waarden staan nu ingesteld voor `tokenExpiration` en `tokenRenewal`?
-- Hebben de groepen op productie die moeten lezen al `read:source`?
-- Hebben gebruikers op productie `write:styles` of `write:scripts`? Dan weigeren
-  updates via MCP voor hen, tenzij ze ook `manage:pages` hebben.
 - Welke reverse proxy (nginx, Traefik, Caddy)?
 - Alleen lezen, of moeten schrijftools ook beschikbaar zijn?
 - Alleen persoonlijke tokens (fase 4), of ook OAuth voor custom connectors (fase 5)?
