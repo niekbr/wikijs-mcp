@@ -80,16 +80,24 @@ Never run `git clean -fdx` in this folder: it would delete all three.
 ### 1. Install in the Wiki.js container
 
 ```bash
-apt install python3-venv git
+apt install python3-venv git pipx
+PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install poetry==1.7.1
 useradd --system --home /nonexistent --shell /usr/sbin/nologin mcp
 git clone <this repository> /opt/wikijs-mcp
 cd /opt/wikijs-mcp
 python3 -m venv .venv
-.venv/bin/pip install .
+VIRTUAL_ENV=/opt/wikijs-mcp/.venv poetry install --only main --no-interaction
 install -d -o mcp -g mcp -m 700 data
 ```
 
 Python 3.10 or newer is required.
+
+The dependencies are installed from `poetry.lock`, so production runs exactly the
+versions CI tests and audits, with their hashes checked. `VIRTUAL_ENV` makes Poetry
+install into `.venv`, which the systemd unit runs, instead of a venv of its own.
+Poetry runs only during installs and updates and lives in its own venv
+(`/opt/pipx`); the service never uses it. Keep its version equal to the one that
+wrote `poetry.lock` (see the file's first line).
 
 ### 2. Configure
 
@@ -152,7 +160,7 @@ through them. Everything else under `/.well-known` stays with Wiki.js.
 ```bash
 cd /opt/wikijs-mcp
 git pull
-.venv/bin/pip install .
+VIRTUAL_ENV=/opt/wikijs-mcp/.venv poetry install --only main --no-interaction --sync
 systemctl restart wikijs-mcp
 ```
 
