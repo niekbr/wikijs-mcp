@@ -43,6 +43,9 @@ class WikiJSConfig(BaseModel):
     pat_default_ttl: int = Field(default=parse_duration("90d"))
     pat_max_ttl: int = Field(default=parse_duration("365d"))
     html_timeout: float = Field(default=10.0)
+    host: str = Field(default="127.0.0.1")
+    port: int = Field(default=8000)
+    forwarded_allow_ips: str = Field(default="127.0.0.1")
     read_only: bool = Field(default=True)
     debug: bool = Field(default=False)
 
@@ -78,6 +81,9 @@ class WikiJSConfig(BaseModel):
             "pat_default_ttl": "WIKIJS_MCP_PAT_DEFAULT_TTL",
             "pat_max_ttl": "WIKIJS_MCP_PAT_MAX_TTL",
             "html_timeout": "WIKIJS_HTML_TIMEOUT",
+            "host": "WIKIJS_MCP_HOST",
+            "port": "WIKIJS_MCP_PORT",
+            "forwarded_allow_ips": "WIKIJS_MCP_FORWARDED_ALLOW_IPS",
         }
         for field, env_name in optional.items():
             if os.getenv(env_name):
@@ -93,8 +99,21 @@ class WikiJSConfig(BaseModel):
         """URL of the Wiki.js source view of a page."""
         return f"{self.url.rstrip('/')}/s/{locale}/{path.strip('/')}"
 
-    def validate_config(self) -> None:
-        """Validate that required configuration is present."""
+    @property
+    def mcp_url(self) -> str:
+        """Public URL of the MCP endpoint."""
+        return f"{self.public_url.rstrip('/')}{self.mcp_base_path.rstrip('/')}/"
+
+    @property
+    def login_url(self) -> str:
+        """Public URL where users (re)connect their Wiki.js account."""
+        return f"{self.public_url.rstrip('/')}{self.mcp_base_path.rstrip('/')}/login"
+
+    def validate_config(self, only: list[str] | None = None) -> None:
+        """Validate that required configuration is present.
+
+        `only` limits the required fields, e.g. for the stdio development mode.
+        """
         required = {
             "url": "WIKIJS_URL",
             "public_url": "WIKIJS_PUBLIC_URL",
@@ -102,17 +121,20 @@ class WikiJSConfig(BaseModel):
             "db_path": "WIKIJS_MCP_DB_PATH",
             "encryption_key": "WIKIJS_MCP_ENCRYPTION_KEY",
         }
+        if only is not None:
+            required = {field: env for field, env in required.items() if field in only}
         missing = [env for field, env in required.items() if not getattr(self, field)]
         if missing:
             raise ValueError(
                 f"Missing required environment variable(s): {', '.join(missing)}"
             )
-        try:
-            Fernet(self.encryption_key)
-        except ValueError as e:
-            raise ValueError(
-                "WIKIJS_MCP_ENCRYPTION_KEY is not a valid Fernet key"
-            ) from e
+        if "encryption_key" in required:
+            try:
+                Fernet(self.encryption_key)
+            except ValueError as e:
+                raise ValueError(
+                    "WIKIJS_MCP_ENCRYPTION_KEY is not a valid Fernet key"
+                ) from e
         if not self.mcp_base_path.startswith("/"):
             raise ValueError("WIKIJS_MCP_BASE_PATH must start with '/'")
         if self.pat_default_ttl > self.pat_max_ttl:

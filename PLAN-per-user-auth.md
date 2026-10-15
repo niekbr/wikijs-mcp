@@ -331,7 +331,42 @@ tokens die blijven werken na opnieuw inloggen.
 
 ---
 
-## Fase 3: HTTP-server, auth via de SDK en tools aanpassen
+## Fase 3: HTTP-server, auth via de SDK en tools aanpassen ✅ afgerond (2026-10-15)
+
+Gebouwd en end-to-end getest tegen de dev-wiki, via HTTP met dev-tokens en de
+MCP-client van de SDK. Afwijkingen en aanvullingen:
+- **`wikijs_mcp/auth.py`:**
+  - `StoreTokenVerifier`: de `TokenVerifier` van de SDK, met de store erachter
+  - per tool-call een `SessionUser` uit een "user source": `token_user_source` voor
+    HTTP, `static_user_source` voor stdio. De server hangt zo niet af van de
+    transport, en de tests gebruiken een nep-gebruiker.
+- **Auth en transport:**
+  - `AuthSettings(resource_server_url=None)`: zonder OAuth-metadataroute en zonder
+    `resource_metadata` in `WWW-Authenticate`. Dat komt in fase 5.
+  - Het endpoint is `<mcp_base_path>/`; `/mcp` geeft een 307 naar `/mcp/`.
+  - De Host-controle staat aan, met alleen de host uit `public_url` (anders 421).
+- **Configuratie:** nieuw zijn `WIKIJS_MCP_HOST` (standaard `127.0.0.1`),
+  `WIKIJS_MCP_PORT` (`8000`) en `WIKIJS_MCP_FORWARDED_ALLOW_IPS` (`127.0.0.1`).
+  `validate_config(only=...)` controleert per modus alleen wat nodig is.
+- **CLI:**
+  - `wikijs-mcp [serve]`
+  - `wikijs-mcp dev-token --jwt-file F [--name] [--ttl 7d]`: controleert de JWT eerst
+    met `users.profile`
+  - `wikijs-mcp stdio --dev-jwt-file F`
+- **Purge:** `serve` draait elk uur `purge_expired()`.
+- **Meldingen** van de tools zijn in het Engels, net als de rest van de tools:
+  - "The wiki session has expired. Log in again at …/mcp/login"
+  - "The wiki no longer accepts this session …"
+  - "No access to X, or it does not exist." plus een hint per tool (`read:source`,
+    `read:history`, `manage:pages`, `delete:pages`)
+- **History en version** controleren een opgegeven id eerst tegen `pages.list`. Een
+  onbekend id bereikt Wiki.js dus nooit (dat lek via de TypeError is dicht).
+- **De auditlog** (`wikijs_mcp.audit`) schrijft per call één JSON-regel met tool,
+  target, user_id, e-mail en uitkomst. `httpx` logt alleen nog op WARNING, omdat de
+  URL's paden bevatten.
+- **Versie:** `mcp >= 1.30` (de geteste versie). `poetry lock` moet nog draaien.
+- **Bekend:** de stdio-modus en `.mcp.json` in de repo worden in fase 6 bijgewerkt.
+
 
 **`server.py`**
 - Draai als Streamable HTTP via `uvicorn`: `FastMCP.streamable_http_app()`, samen met de
