@@ -30,7 +30,7 @@ from . import wiki_jwt
 from .client import WikiJSClient
 from .config import WikiJSConfig
 from .errors import WikiError
-from .oauth import client_display
+from .oauth import client_display, redirect_origin
 from .store import LOGIN_STATE_TTL, Store
 
 logger = logging.getLogger(__name__)
@@ -398,7 +398,7 @@ class WebRoutes:
             )
         _, client_info, params = pending
         name, _ = client_display(client_info)
-        redirect = urlsplit(str(params.redirect_uri))
+        redirect = redirect_origin(str(params.redirect_uri))
         csrf = html.escape(session.csrf_secret)
         abilities = (
             "read every wiki page you can read"
@@ -408,10 +408,10 @@ class WebRoutes:
         body = (
             f"<p>Signed in as <strong>{html.escape(session.name)}</strong> "
             f"({html.escape(session.email)}).</p>"
-            f"<p><strong>{html.escape(name)}</strong> wants to act as you in the wiki: "
-            f"it can {abilities}.</p>"
+            f"<p>An app calling itself <strong>{html.escape(name)}</strong> wants to "
+            f"act as you in the wiki: it can {abilities}.</p>"
             f"<p class='note'>After you allow it, you are sent to "
-            f"<strong>{html.escape(redirect.scheme)}://{html.escape(redirect.netloc)}</strong>. "
+            f"<strong>{html.escape(redirect)}</strong>. "
             "Only continue if you just started connecting this app yourself and "
             "recognise that address.</p>"
             f"<p>The app keeps access until you disconnect it on the "
@@ -427,7 +427,7 @@ class WebRoutes:
         return _page(
             "Connect an app to the wiki",
             body,
-            form_targets=(f"{redirect.scheme}://{redirect.netloc}",),
+            form_targets=(redirect,),
         )
 
     async def decide(self, request: Request) -> Response:

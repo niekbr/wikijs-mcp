@@ -12,7 +12,7 @@ import pytest
 from tests.conftest import TEST_FERNET_KEY
 from tests.helpers import make_jwt
 from wikijs_mcp.auth import StoreTokenVerifier
-from wikijs_mcp.oauth import _allowed_redirect_uri
+from wikijs_mcp.oauth import _allowed_redirect_uri, client_display, redirect_origin
 from wikijs_mcp.server import build_http_app
 from wikijs_mcp.store import OAUTH_CODE_TTL, OAUTH_PENDING_TTL, Store
 from wikijs_mcp.web import SESSION_COOKIE
@@ -190,10 +190,46 @@ class TestRegistration:
             ("https://claude.ai/cb#fragment", False),
             ("javascript:alert(1)", False),
             ("myapp://callback", False),
+            # User info makes the real host hard to see
+            ("https://claude.ai@evil.example/cb", False),
+            ("https://user:pass@claude.ai/cb", False),
+            ("http://localhost@evil.example/cb", False),
         ],
     )
     def test_redirect_uri_policy(self, uri, allowed):
         assert _allowed_redirect_uri(uri) is allowed
+
+    async def test_rejects_user_info_in_redirect(self, http):
+        response = await http.post(
+            "/mcp/oauth/register",
+            json={
+                "redirect_uris": ["https://claude.ai@evil.example/cb"],
+                "client_name": "Claude",
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_redirect_uri"
+
+    @pytest.mark.parametrize(
+        "uri,origin",
+        [
+            ("https://claude.ai/api/mcp/auth_callback", "https://claude.ai"),
+            ("https://claude.ai@evil.example/cb", "https://evil.example"),
+            ("http://localhost:33418/callback", "http://localhost:33418"),
+            ("http://[::1]:9999/callback", "http://[::1]:9999"),
+        ],
+    )
+    def test_redirect_origin_shows_real_host(self, uri, origin):
+        assert redirect_origin(uri) == origin
+
+    def test_client_display_shows_real_host(self):
+        """Clients stored before user info was refused are shown by their real host."""
+        info = (
+            '{"client_id": "x", "redirect_uris": ["https://claude.ai@evil.example/cb"]}'
+        )
+
+        assert client_display(info) == ("x", "evil.example")
 
     async def test_rejects_foreign_http_redirect(self, http):
         response = await http.post(
@@ -223,7 +259,7 @@ class TestAuthorizationFlow:
 
         page = await http.get(consent_path)
 
-        assert "&lt;b&gt;Claude&lt;/b&gt;" in page.text
+        assert "calling itself <strong>&lt;b&gt;Claude&lt;/b&gt;</strong>" in page.text
         assert "https://claude.ai" in page.text
         assert "read every wiki page you can read" in page.text
         assert page.headers["x-frame-options"] == "DENY"

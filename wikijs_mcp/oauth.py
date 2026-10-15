@@ -43,11 +43,23 @@ def issuer_url(config: WikiJSConfig) -> str:
 def _allowed_redirect_uri(uri: str) -> bool:
     """HTTPS anywhere, or plain HTTP to a local loopback port (native apps)."""
     parts = urlsplit(uri)
-    if parts.fragment:
+    # No user info: `https://claude.ai@evil.example/` goes to evil.example
+    if parts.fragment or parts.username is not None or parts.password is not None:
         return False
     if parts.scheme == "https":
         return bool(parts.hostname)
     return parts.scheme == "http" and parts.hostname in LOOPBACK_HOSTS
+
+
+def redirect_origin(uri: str) -> str:
+    """scheme://host[:port] of a redirect URI, without any user info, for display
+    and for the consent page's CSP."""
+    parts = urlsplit(uri)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}"
 
 
 class WikiOAuthProvider:
@@ -239,7 +251,10 @@ def client_display(client_info: str) -> tuple[str, str]:
     """(name, redirect hosts) of a stored client, for the consent and token pages."""
     info = json.loads(client_info)
     hosts = sorted(
-        {urlsplit(str(uri)).netloc for uri in info.get("redirect_uris") or []}
+        {
+            redirect_origin(str(uri)).split("://", 1)[1]
+            for uri in info.get("redirect_uris") or []
+        }
     )
     return info.get("client_name") or info.get("client_id", "unknown app"), ", ".join(
         hosts
