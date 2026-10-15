@@ -66,4 +66,7 @@ def error_for_graphql(error: dict) -> WikiError:
             return WikiAuthRevoked(message)
         if message == "Forbidden":
             return WikiForbidden(message)
+        # Not one of Wiki.js's own errors but an internal one (a crash, a database
+        # error): its text is for the server log, which the client writes
+        return WikiError("Wiki.js could not handle the request")
     return error_for_code(code, message)

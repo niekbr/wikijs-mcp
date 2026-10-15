@@ -213,6 +213,8 @@ class TestTransport:
         with pytest.raises(WikiError) as info:
             await client._execute_query("query { a }")
         assert type(info.value) is WikiError
+        # Internals stay in the server log
+        assert "undefined" not in str(info.value)
 
     @pytest.mark.parametrize(
         "error_code,exc",
