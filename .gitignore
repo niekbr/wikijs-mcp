@@ -152,3 +152,5 @@ bandit-report.json
 # Fase 0 spikes: lokale testaccounts en uitvoer
 scripts/.env.spike
 scripts/out/
+
+deploy
