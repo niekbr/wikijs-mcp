@@ -153,6 +153,7 @@ bandit-report.json
 scripts/.env.spike
 scripts/out/
 
-deploy
+deploy/lxc
+deploy/nginx
 # Production database next to the code (/opt/wikijs-mcp/data)
 data/
