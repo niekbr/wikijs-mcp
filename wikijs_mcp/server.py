@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from mcp.server import FastMCP
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
 
@@ -42,6 +43,11 @@ from .web import WebRoutes
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("wikijs_mcp.audit")
+
+# FastMCP's settings read a ".env" from the working directory. Ours is meant for
+# systemd (root-only), so the service would crash reading it; all settings come
+# from the environment instead.
+FastMCPSettings.model_config["env_file"] = None
 
 INSTRUCTIONS = (
     "Wiki.js MCP server — you act as the signed-in wiki user and see only what "

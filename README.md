@@ -81,12 +81,12 @@ Never run `git clean -fdx` in this folder: it would delete all three.
 
 ```bash
 apt install python3-venv git
-useradd --system --home /nonexistent --shell /usr/sbin/nologin wikijs-mcp
+useradd --system --home /nonexistent --shell /usr/sbin/nologin mcp
 git clone <this repository> /opt/wikijs-mcp
 cd /opt/wikijs-mcp
 python3 -m venv .venv
 .venv/bin/pip install .
-install -d -o wikijs-mcp -g wikijs-mcp -m 700 data
+install -d -o mcp -g mcp -m 700 data
 ```
 
 Python 3.10 or newer is required.

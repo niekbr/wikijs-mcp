@@ -3,6 +3,10 @@
     "wikijs-dev": {
       "type": "http",
       "url": "http://127.0.0.1:3090/mcp/"
+    },
+    "wikijs-prod": {
+      "type": "http",
+      "url": "https://wiki.thor.edu/mcp/"
     }
   }
 }

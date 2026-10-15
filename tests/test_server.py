@@ -145,6 +145,19 @@ class TestSetup:
         assert "edits" not in instructions
         assert "edits" in write_server.app.instructions
 
+    def test_ignores_unreadable_env_file_in_working_dir(
+        self, mock_wiki_config, tmp_path, monkeypatch
+    ):
+        """The root-only .env for systemd must not crash the service user."""
+        env_file = tmp_path / ".env"
+        env_file.write_text("FASTMCP_DEBUG=true\n")
+        env_file.chmod(0)
+        monkeypatch.chdir(tmp_path)
+
+        server = WikiJSMCPServer(mock_wiki_config)
+
+        assert server.app.settings.debug is False
+
     def test_loads_config_when_not_given(self, mock_wiki_config):
         with patch("wikijs_mcp.server.WikiJSConfig.load_config") as load_config:
             load_config.return_value = mock_wiki_config
