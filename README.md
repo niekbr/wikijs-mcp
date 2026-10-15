@@ -64,14 +64,29 @@ Give the groups both the permission and a page rule that grants it.
 This setup runs wikijs-mcp as a systemd service inside the same LXC container as
 Wiki.js, and adds a few locations to the nginx reverse proxy that terminates TLS.
 
+Everything lives in one folder, the git clone itself:
+
+```
+/opt/wikijs-mcp/
+├── .env         settings (root only, mode 600)
+├── .venv/       Python environment
+├── data/        SQLite database (only the service user can write here)
+└── …            the code
+```
+
+`.env`, `.venv/` and `data/` are in `.gitignore`, so `git pull` leaves them alone.
+Never run `git clean -fdx` in this folder: it would delete all three.
+
 ### 1. Install in the Wiki.js container
 
 ```bash
 apt install python3-venv git
 useradd --system --home /nonexistent --shell /usr/sbin/nologin wikijs-mcp
-git clone <this repository> /opt/wikijs-mcp/src
-python3 -m venv /opt/wikijs-mcp/venv
-/opt/wikijs-mcp/venv/bin/pip install /opt/wikijs-mcp/src
+git clone <this repository> /opt/wikijs-mcp
+cd /opt/wikijs-mcp
+python3 -m venv .venv
+.venv/bin/pip install .
+install -d -o wikijs-mcp -g wikijs-mcp -m 700 data
 ```
 
 Python 3.10 or newer is required.
@@ -79,11 +94,11 @@ Python 3.10 or newer is required.
 ### 2. Configure
 
 ```bash
-install -d -m 750 /etc/wikijs-mcp
-install -m 600 /opt/wikijs-mcp/src/.env.example /etc/wikijs-mcp/env
+cd /opt/wikijs-mcp
+install -m 600 .env.example .env
 # Generate the encryption key and put it in WIKIJS_MCP_ENCRYPTION_KEY:
-/opt/wikijs-mcp/venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-editor /etc/wikijs-mcp/env
+.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+editor .env
 ```
 
 [.env.example](.env.example) documents every setting. The important ones:
@@ -102,16 +117,17 @@ editor /etc/wikijs-mcp/env
 ### 3. Run
 
 ```bash
-cp /opt/wikijs-mcp/src/deploy/lxc/wikijs-mcp.service /etc/systemd/system/
+cp /opt/wikijs-mcp/deploy/lxc/wikijs-mcp.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now wikijs-mcp
 journalctl -u wikijs-mcp -f
 ```
 
-The unit is hardened (`ProtectSystem=strict`, no capabilities, a syscall filter). In an
-unprivileged LXC container without nesting, systemd may fail to set up the sandbox
-(`status=226/NAMESPACE`). Enable nesting for the container, or comment out the
-`Protect*`/`Private*` lines.
+The unit is hardened: the code and the rest of the system are read-only for the
+service (`ProtectSystem=strict`, only `data/` is writable), it has no capabilities,
+and a syscall filter applies. In an unprivileged LXC container without nesting,
+systemd may fail to set up the sandbox (`status=226/NAMESPACE`). Enable nesting for
+the container, or comment out the `Protect*`/`Private*` lines.
 
 ### 4. nginx
 
@@ -134,13 +150,14 @@ through them. Everything else under `/.well-known` stays with Wiki.js.
 ### Updating
 
 ```bash
-git -C /opt/wikijs-mcp/src pull
-/opt/wikijs-mcp/venv/bin/pip install /opt/wikijs-mcp/src
+cd /opt/wikijs-mcp
+git pull
+.venv/bin/pip install .
 systemctl restart wikijs-mcp
 ```
 
-The database schema is upgraded automatically. To back it up, back up
-`/var/lib/wikijs-mcp/` together with `/etc/wikijs-mcp/env`.
+The database schema is upgraded automatically. For backups, back up `.env` and
+`data/` together: the database is useless without the encryption key in `.env`.
 
 ## Using it
 

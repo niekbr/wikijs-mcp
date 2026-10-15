@@ -154,3 +154,5 @@ scripts/.env.spike
 scripts/out/
 
 deploy
+# Production database next to the code (/opt/wikijs-mcp/data)
+data/
