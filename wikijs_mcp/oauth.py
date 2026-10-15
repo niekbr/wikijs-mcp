@@ -12,6 +12,7 @@ needs its own reverse proxy locations.
 """
 
 import json
+import logging
 from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import (
@@ -30,6 +31,8 @@ from starlette.routing import BaseRoute, Mount, Route
 
 from .config import WikiJSConfig
 from .store import Store
+
+logger = logging.getLogger(__name__)
 
 ACCESS_TOKEN_TTL = 3600
 SCOPE = "wiki"
@@ -141,6 +144,7 @@ class WikiOAuthProvider:
     ) -> RefreshToken | None:
         found = await self.store.get_refresh_token(client.client_id, refresh_token)
         if found is None:
+            await self._end_grant_if_reused(client.client_id, refresh_token)
             return None
         wiki_user_id, scopes, expires_at = found
         return RefreshToken(
@@ -161,10 +165,25 @@ class WikiOAuthProvider:
         if not await self.store.revoke_refresh_token(
             client.client_id, refresh_token.token
         ):
+            await self._end_grant_if_reused(client.client_id, refresh_token.token)
             raise TokenError("invalid_grant", "Refresh token was already used")
         return await self._issue(
             client.client_id, int(refresh_token.subject), scopes or refresh_token.scopes
         )
+
+    async def _end_grant_if_reused(self, client_id: str, refresh_token: str) -> None:
+        """A used refresh token coming back means it leaked (or the client lost a
+        response): either the thief or the app holds the newer one, so end the
+        whole grant and let the user sign in again (OAuth 2.1, section 4.3.1)."""
+        wiki_user_id = await self.store.used_refresh_token_owner(
+            client_id, refresh_token
+        )
+        if wiki_user_id is not None:
+            logger.warning(
+                f"Reused refresh token of OAuth app {client_id} for wiki user "
+                f"{wiki_user_id}; access of the app revoked"
+            )
+            await self.store.revoke_oauth_grant(wiki_user_id, client_id)
 
     async def _issue(
         self, client_id: str, wiki_user_id: int, scopes: list[str]

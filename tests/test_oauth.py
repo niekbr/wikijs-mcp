@@ -469,6 +469,45 @@ class TestRefreshAndRevoke:
         assert reused.status_code == 400
         assert reused.json()["error"] == "invalid_grant"
 
+    async def test_reused_refresh_token_ends_the_grant(self, http, store):
+        """Whoever refreshed first (the app or a thief) loses access too."""
+        client_id, tokens = await full_flow(http, store)
+        refresh = {
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": client_id,
+        }
+        newer = (await token_request(http, **refresh)).json()
+
+        reused = await token_request(http, **refresh)
+
+        assert reused.status_code == 400
+        verifier = StoreTokenVerifier(store, RENEWAL)
+        assert await verifier.verify_token(newer["access_token"]) is None
+        assert await verifier.verify_token(tokens["access_token"]) is None
+        refreshed = await token_request(
+            http,
+            grant_type="refresh_token",
+            refresh_token=newer["refresh_token"],
+            client_id=client_id,
+        )
+        assert refreshed.status_code == 400
+        assert await store.list_oauth_grants(3) == []
+
+    async def test_unknown_refresh_token_ends_nothing(self, http, store):
+        client_id, tokens = await full_flow(http, store)
+
+        response = await token_request(
+            http,
+            grant_type="refresh_token",
+            refresh_token="wikimcp_rt_made-up",
+            client_id=client_id,
+        )
+
+        assert response.status_code == 400
+        verifier = StoreTokenVerifier(store, RENEWAL)
+        assert await verifier.verify_token(tokens["access_token"]) is not None
+
     async def test_refresh_stops_at_session_max_age(self, http, store, clock):
         client_id, tokens = await full_flow(http, store)
         clock.now += MAX_AGE

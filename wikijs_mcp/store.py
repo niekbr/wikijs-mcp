@@ -614,6 +614,19 @@ class Store:
             return None
         return row["wiki_user_id"], row["scopes"].split(), row["expires_at"]
 
+    async def used_refresh_token_owner(self, client_id: str, token: str) -> int | None:
+        """The user of a refresh token issued to this client that was already
+        revoked (used or disconnected), or None. Kept for `revoked_retention`."""
+        async with self.db.execute(
+            """
+            SELECT wiki_user_id FROM oauth_refresh_tokens
+            WHERE token_hash = ? AND client_id = ? AND revoked_at IS NOT NULL
+            """,
+            (hash_secret(token), client_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row["wiki_user_id"] if row else None
+
     async def revoke_refresh_token(self, client_id: str, token: str) -> bool:
         """Revoke one refresh token (rotation); False if it was not usable."""
         cursor = await self.db.execute(
