@@ -607,7 +607,35 @@ Pas doen als de gebruiker dat wil, bijvoorbeeld voor claude.ai of Claude Desktop
 
 ---
 
-## Fase 6: uitrol
+## Fase 6: uitrol ✅ afgerond (2026-10-15)
+
+Afgestemd op de productie-opzet van de gebruiker: nginx (TLS) in een proxy-LXC, die
+doorstuurt naar een LXC met Wiki.js. **wikijs-mcp draait als systemd-service in de
+Wiki.js-LXC** (keuze gebruiker). OAuth staat meteen aan.
+
+**Opgeleverd:**
+- `deploy/lxc/wikijs-mcp.service`: systemd-unit (eigen gebruiker, `StateDirectory`,
+  hardening; `systemd-analyze security` geeft 1.5 "OK")
+- `deploy/nginx/wikijs-mcp.conf`: upstream en rate limits op http-niveau; locations
+  voor de auth-/token-/OAuth-pagina's, het MCP-endpoint, `/mcp` → `/mcp/` en de twee
+  `/.well-known`-paden. Getest met `nginx -t` en op routering (in een tijdelijke
+  nginx tegen de dev-server).
+- `.env.example`: alle variabelen, met uitleg en het commando voor de Fernet-sleutel
+- README herschreven: werking, installatie in de LXC, nginx, gebruik (token, OAuth,
+  claude.ai), levensduren, beveiliging, bekende beperkingen, ontwikkeling
+- `.mcp.json`: wijst naar de dev-omgeving (`http://127.0.0.1:3090/mcp/`, OAuth)
+- `poetry.lock` bijgewerkt met poetry 1.7.1 (de versie in CI): `aiosqlite` erbij,
+  `mcp` naar 1.30.0
+- Een schone installatie vanuit de wheel werkt (`pip install`, `wikijs-mcp --help`)
+
+**Afwijkingen:**
+- **Geen Dockerfile en docker-compose voor productie:** de gebruiker draait LXC
+  zonder Docker. `deploy/dev` gebruikt Docker alleen voor de testomgeving.
+- **Niet getest in een echte LXC.** In een unprivileged LXC zonder nesting kan de
+  sandbox van systemd falen (`226/NAMESPACE`); de README beschrijft dat.
+- **CI:** `.github/workflows/publish.yml` publiceert bij een release naar PyPI onder de
+  naam `wikijs-mcp`, de naam van upstream. Voor deze fork uitzetten of hernoemen.
+
 
 - `Dockerfile` (python:3.12-slim, uitvoeren als non-root, volume voor `db_path`).
 - `deploy/docker-compose.yml` met de MCP-service naast de bestaande wiki.
