@@ -47,6 +47,7 @@ class WikiJSConfig(BaseModel):
     port: int = Field(default=8000)
     forwarded_allow_ips: str = Field(default="127.0.0.1")
     read_only: bool = Field(default=True)
+    oauth_enabled: bool = Field(default=False)
     debug: bool = Field(default=False)
 
     @field_validator(
@@ -73,6 +74,7 @@ class WikiJSConfig(BaseModel):
             "encryption_key": os.getenv("WIKIJS_MCP_ENCRYPTION_KEY", ""),
             "default_locale": os.getenv("WIKIJS_DEFAULT_LOCALE", ""),
             "read_only": _env_bool("WIKIJS_MCP_READ_ONLY", True),
+            "oauth_enabled": _env_bool("WIKIJS_MCP_OAUTH", False),
             "debug": _env_bool("DEBUG", False),
         }
         optional = {

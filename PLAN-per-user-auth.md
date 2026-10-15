@@ -530,7 +530,60 @@ claude mcp add --transport http wikijs https://wiki.example.com/mcp/ \
 
 ---
 
-## Fase 5 (optioneel): OAuth voor custom connectors
+## Fase 5 (optioneel): OAuth voor custom connectors ✅ afgerond (2026-10-15)
+
+Gebouwd met de OAuth-handlers van de `mcp`-SDK (keuze gebruiker: optie 1, geen Authlib
+of fastmcp). De SDK doet het protocol: PKCE (alleen S256), redirect-URI-controle,
+client-authenticatie, de token-endpoint, dynamic client registration, revocation en
+metadata. Eigen code:
+- `wikijs_mcp/oauth.py`: `WikiOAuthProvider` (de interface van de SDK, met de store
+  erachter) en `oauth_routes()`
+- het toestemmingsscherm en "Connected apps" in `web.py`
+- de OAuth-tabellen in de store
+
+**Getest:**
+- end-to-end met de **OAuth-client van de SDK** via de nginx-proxy van de dev-omgeving:
+  discovery, registratie, Wiki.js-login, toestemming, MCP-aanroep, refresh-rotatie,
+  revocation en weigeren
+- in-process in `tests/test_oauth.py`, met opzettelijke fouten als controle
+
+**Nog niet getest:** claude.ai of Claude Desktop zelf (die moeten de server via
+internet kunnen bereiken).
+
+Inrichting en afwijkingen van het plan:
+- **Aanzetten:** met `WIKIJS_MCP_OAUTH=true` (standaard uit). Zonder die vlag gedraagt
+  de server zich als in fase 4.
+- **De issuer is `<public_url>/mcp/oauth`, niet `/mcp`**: `<issuer>/token` zou anders
+  botsen met de tokenpagina `/mcp/token`. Endpoints: `/mcp/oauth/authorize`, `/token`,
+  `/register` en `/revoke`. De SDK zet die routes op de root, dus ze worden onder
+  `/mcp/oauth` gemount.
+- **Metadata (buiten `/mcp/`, eigen proxy-locaties nodig):**
+  - `/.well-known/oauth-protected-resource/mcp/` (RFC 9728; de route komt van de SDK;
+    `WWW-Authenticate` verwijst ernaar)
+  - `/.well-known/oauth-authorization-server/mcp/oauth` (RFC 8414), en daarnaast ook
+    `/mcp/oauth/.well-known/oauth-authorization-server`
+- **Clients:**
+  - Registratie is open, maar redirect-URI's moeten **https** zijn, of **http naar
+    loopback** (localhost, 127.0.0.1, ::1), zonder fragment.
+  - Registraties waarmee binnen 1 dag niemand een token heeft gekregen, worden
+    opgeruimd.
+- **Toestemming:**
+  - `/mcp/oauth/consent/<id>` vereist een web-sessie (dus de Wiki.js-login uit fase 4).
+  - Het scherm toont de naam van de app, wat die mag (lezen of ook schrijven) en de
+    host waar de gebruiker naartoe gaat.
+  - Een verzoek is eenmalig en 10 minuten geldig. Er is **altijd** toestemming nodig,
+    ook voor een app die al eerder toestemming kreeg.
+- **Tokens:**
+  - Access tokens zijn rijen in `mcp_tokens` (`kind='oauth'`), 1 uur geldig.
+  - Refresh tokens roteren bij elk gebruik en gelden tot `login_at + session_max_age`.
+  - Een authorization code is 5 minuten geldig en eenmalig.
+- **Intrekken:** een access of refresh token intrekken (via `/revoke`, of
+  "Disconnect" op de tokenpagina) beëindigt de **hele koppeling** van die app voor die
+  gebruiker. De tokenpagina toont OAuth-apps apart; hun access tokens staan niet in de
+  lijst met persoonlijke tokens.
+- **SDK-eigenaardigheid:** `/revoke` vraagt een `client_secret`-veld, ook bij publieke
+  clients (leeg is goed). Zonder dat veld geeft de SDK een 400.
+
 
 Pas doen als de gebruiker dat wil, bijvoorbeeld voor claude.ai of Claude Desktop.
 

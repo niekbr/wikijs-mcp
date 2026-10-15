@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from mcp.server import FastMCP
+from mcp.server.auth.provider import AuthorizationParams, construct_redirect_uri
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
@@ -27,6 +28,7 @@ from . import wiki_jwt
 from .client import WikiJSClient
 from .config import WikiJSConfig
 from .errors import WikiError
+from .oauth import client_display
 from .store import LOGIN_STATE_TTL, Store
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,12 @@ class WebRoutes:
             (f"{self.base}/token/revoke", ["POST"], self.revoke_token),
             (f"{self.base}/logout", ["POST"], self.logout),
         ]
+        if self.config.oauth_enabled:
+            routes += [
+                (f"{self.base}/oauth/consent/{{pending_id}}", ["GET"], self.consent),
+                (f"{self.base}/oauth/consent/{{pending_id}}", ["POST"], self.decide),
+                (f"{self.base}/oauth/apps/revoke", ["POST"], self.revoke_app),
+            ]
         for path, methods, handler in routes:
             app.custom_route(path, methods=methods)(handler)
 
@@ -279,7 +287,7 @@ class WebRoutes:
 
     async def _render_tokens(self, session, created: str | None = None) -> HTMLResponse:
         now = self._now()
-        tokens = await self.store.list_tokens(session.wiki_user_id)
+        tokens = await self.store.list_tokens(session.wiki_user_id, kind="pat")
         relogin_at = session.login_at + self.config.session_max_age
         jwt_dies_at = session.jwt_exp + self.config.token_renewal
         csrf = html.escape(session.csrf_secret)
@@ -335,7 +343,7 @@ class WebRoutes:
         body += "<h2>Your tokens</h2>"
         if tokens:
             rows = "".join(
-                f"<tr><td>{html.escape(t['name'])}</td><td>{t['kind']}</td>"
+                f"<tr><td>{html.escape(t['name'])}</td>"
                 f"<td>{_fmt(t['created_at'])}</td><td>{_fmt(t['expires_at'])}</td>"
                 f"<td>{_fmt(t['last_used_at'])}</td><td>"
                 f"<form class='inline' method='post' action='{self.base}/token/revoke'>"
@@ -345,11 +353,14 @@ class WebRoutes:
                 for t in tokens
             )
             body += (
-                "<table><tr><th>Name</th><th>Type</th><th>Created</th><th>Expires</th>"
+                "<table><tr><th>Name</th><th>Created</th><th>Expires</th>"
                 f"<th>Last used</th><th></th></tr>{rows}</table>"
             )
         else:
             body += "<p>You have no active tokens.</p>"
+
+        if self.config.oauth_enabled:
+            body += await self._render_apps(session, csrf)
 
         body += (
             f"<h2>Sign out</h2><form method='post' action='{self.base}/logout'>"
@@ -357,6 +368,27 @@ class WebRoutes:
             "<button type='submit'>Sign out of this page</button></form>"
         )
         return _page("Wiki MCP tokens", body)
+
+    async def _render_apps(self, session, csrf: str) -> str:
+        grants = await self.store.list_oauth_grants(session.wiki_user_id)
+        body = "<h2>Connected apps</h2>"
+        if not grants:
+            return body + "<p>No apps are connected through OAuth.</p>"
+        rows = ""
+        for grant in grants:
+            name, hosts = client_display(grant["client_info"])
+            rows += (
+                f"<tr><td>{html.escape(name)}</td><td>{html.escape(hosts)}</td>"
+                f"<td>{_fmt(grant['since'])}</td><td>{_fmt(grant['last_refresh'])}</td><td>"
+                f"<form class='inline' method='post' action='{self.base}/oauth/apps/revoke'>"
+                f"<input type='hidden' name='csrf' value='{csrf}'>"
+                f"<input type='hidden' name='client_id' value='{html.escape(grant['client_id'])}'>"
+                "<button type='submit'>Disconnect</button></form></td></tr>"
+            )
+        return body + (
+            "<table><tr><th>App</th><th>Redirects to</th><th>Connected</th>"
+            f"<th>Last refreshed</th><th></th></tr>{rows}</table>"
+        )
 
     async def token_page(self, request: Request) -> Response:
         session = await self._session(request)
@@ -392,4 +424,100 @@ class WebRoutes:
             return self._error("Unknown token.")
         await self.store.revoke_token(session.wiki_user_id, token_id)
         logger.info(f"Token {token_id} revoked by wiki user {session.wiki_user_id}")
+        return RedirectResponse(f"{self.base}/token", status_code=303)
+
+    # ------------------------------------------------------------------
+    # OAuth consent (fase 5)
+    # ------------------------------------------------------------------
+
+    async def _pending(self, pending_id: str):
+        """(client_id, client_info, params) of a pending authorization, or None."""
+        pending = await self.store.get_oauth_pending(pending_id)
+        if pending is None:
+            return None
+        client_id, params = pending
+        client_info = await self.store.get_oauth_client(client_id)
+        if client_info is None:
+            return None
+        return client_id, client_info, AuthorizationParams.model_validate_json(params)
+
+    async def consent(self, request: Request) -> Response:
+        pending_id = request.path_params["pending_id"]
+        pending = await self._pending(pending_id)
+        if pending is None:
+            return self._error(
+                "This authorization request has expired. Start connecting the app again."
+            )
+        session = await self._session(request)
+        if session is None:
+            return RedirectResponse(
+                f"{self.base}/login?next={self.base}/oauth/consent/{pending_id}",
+                status_code=303,
+            )
+        _, client_info, params = pending
+        name, _ = client_display(client_info)
+        redirect = urlsplit(str(params.redirect_uri))
+        csrf = html.escape(session.csrf_secret)
+        abilities = (
+            "read every wiki page you can read"
+            if self.config.read_only
+            else "read and change every wiki page you can read and change"
+        )
+        body = (
+            f"<p>Signed in as <strong>{html.escape(session.name)}</strong> "
+            f"({html.escape(session.email)}).</p>"
+            f"<p><strong>{html.escape(name)}</strong> wants to act as you in the wiki: "
+            f"it can {abilities}.</p>"
+            f"<p class='note'>After you allow it, you are sent to "
+            f"<strong>{html.escape(redirect.scheme)}://{html.escape(redirect.netloc)}</strong>. "
+            "Only continue if you just started connecting this app yourself and "
+            "recognise that address.</p>"
+            f"<p>The app keeps access until you disconnect it on the "
+            f"<a href='{self.base}/token'>token page</a>, or until "
+            f"{_fmt(session.login_at + self.config.session_max_age)} unless you sign "
+            "in again.</p>"
+            f"<form method='post' action='{self.base}/oauth/consent/{html.escape(pending_id)}'>"
+            f"<input type='hidden' name='csrf' value='{csrf}'>"
+            "<button type='submit' name='decision' value='allow'>Allow</button> "
+            "<button type='submit' name='decision' value='deny'>Deny</button></form>"
+        )
+        return _page("Connect an app to the wiki", body)
+
+    async def decide(self, request: Request) -> Response:
+        pending_id = request.path_params["pending_id"]
+        session, form = await self._form_session(request)
+        if session is None:
+            return self._redirect_to_login()
+        pending = await self._pending(pending_id)
+        # Single use: whoever deletes it first decides
+        if pending is None or not await self.store.delete_oauth_pending(pending_id):
+            return self._error("This authorization request has expired.")
+        client_id, _, params = pending
+
+        if form.get("decision") != "allow":
+            target = construct_redirect_uri(
+                str(params.redirect_uri), error="access_denied", state=params.state
+            )
+            return RedirectResponse(target, status_code=303)
+
+        code, _ = await self.store.create_oauth_code(
+            client_id, session.wiki_user_id, params.model_dump_json()
+        )
+        logger.info(
+            f"OAuth app {client_id} authorized by wiki user {session.wiki_user_id}"
+        )
+        target = construct_redirect_uri(
+            str(params.redirect_uri), code=code, state=params.state
+        )
+        return RedirectResponse(target, status_code=303)
+
+    async def revoke_app(self, request: Request) -> Response:
+        session, form = await self._form_session(request)
+        if session is None:
+            return self._redirect_to_login()
+        client_id = str(form.get("client_id", ""))
+        await self.store.revoke_oauth_grant(session.wiki_user_id, client_id)
+        logger.info(
+            f"OAuth app {client_id} disconnected by wiki user {session.wiki_user_id}"
+        )
         return RedirectResponse(f"{self.base}/token", status_code=303)

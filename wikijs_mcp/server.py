@@ -18,6 +18,7 @@ from mcp.server import FastMCP
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.applications import Starlette
 
 from . import wiki_jwt
 from .auth import (
@@ -35,6 +36,7 @@ from .errors import (
     WikiForbidden,
     WikiNotFound,
 )
+from .oauth import WikiOAuthProvider, issuer_url, oauth_routes
 from .store import Store
 from .web import WebRoutes
 
@@ -107,12 +109,7 @@ class WikiJSMCPServer:
             public_host = urlsplit(self.config.public_url).netloc
             settings = {
                 "token_verifier": token_verifier,
-                # Resource-server only; OAuth metadata comes with fase 5
-                "auth": AuthSettings(
-                    issuer_url=self.config.public_url.rstrip("/")
-                    + self.config.mcp_base_path,
-                    resource_server_url=None,
-                ),
+                "auth": self._auth_settings(),
                 "streamable_http_path": self.config.mcp_base_path.rstrip("/") + "/",
                 "transport_security": TransportSecuritySettings(
                     enable_dns_rebinding_protection=True,
@@ -127,6 +124,21 @@ class WikiJSMCPServer:
             name="wikijs-mcp-server", instructions=instructions, **settings
         )
         self._setup_tools()
+
+    def _auth_settings(self) -> AuthSettings:
+        if self.config.oauth_enabled:
+            # Advertise our authorization server: WWW-Authenticate then points to
+            # /.well-known/oauth-protected-resource<base>/, served by the SDK
+            return AuthSettings(
+                issuer_url=issuer_url(self.config),
+                resource_server_url=self.config.mcp_url,
+                validate_token_resource=False,  # personal tokens have no resource
+            )
+        # Resource server only: no OAuth metadata, personal tokens only
+        return AuthSettings(
+            issuer_url=self.config.public_url.rstrip("/") + self.config.mcp_base_path,
+            resource_server_url=None,
+        )
 
     # ------------------------------------------------------------------
     # Running a tool as the current user
@@ -759,6 +771,20 @@ class WikiJSMCPServer:
 # ----------------------------------------------------------------------
 
 
+def build_http_app(config: WikiJSConfig, store: Store) -> Starlette:
+    """The complete HTTP app: MCP endpoint, web pages and (optionally) OAuth."""
+    server = WikiJSMCPServer(
+        config,
+        user_source=token_user_source(store),
+        token_verifier=StoreTokenVerifier(store),
+    )
+    WebRoutes(config, store).register(server.app)
+    app = server.app.streamable_http_app()
+    if config.oauth_enabled:
+        app.router.routes.extend(oauth_routes(config, WikiOAuthProvider(config, store)))
+    return app
+
+
 async def _serve(config: WikiJSConfig) -> None:
     """Run the Streamable HTTP server with per-user token auth."""
     import uvicorn
@@ -767,12 +793,7 @@ async def _serve(config: WikiJSConfig) -> None:
     async with Store(
         config.db_path, config.encryption_key, config.session_max_age
     ) as store:
-        server = WikiJSMCPServer(
-            config,
-            user_source=token_user_source(store),
-            token_verifier=StoreTokenVerifier(store),
-        )
-        WebRoutes(config, store).register(server.app)
+        app = build_http_app(config, store)
 
         async def purge_regularly() -> None:
             while True:
@@ -784,7 +805,7 @@ async def _serve(config: WikiJSConfig) -> None:
 
         purge_task = asyncio.create_task(purge_regularly())
         uvicorn_config = uvicorn.Config(
-            server.app.streamable_http_app(),
+            app,
             host=config.host,
             port=config.port,
             proxy_headers=True,
