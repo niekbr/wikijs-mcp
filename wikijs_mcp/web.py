@@ -1,4 +1,4 @@
-"""Browser routes: log in through Wiki.js and manage personal MCP tokens.
+"""Browser routes: log in through Wiki.js, consent to OAuth apps, manage them.
 
 Login flow (Wiki.js 2.5, see FASE0-RESULTATEN.md, point 6):
 1. GET  <base>/login            stores a one-time state bound to this browser, sets
@@ -9,7 +9,9 @@ Login flow (Wiki.js 2.5, see FASE0-RESULTATEN.md, point 6):
 3. GET  <base>/auth/callback/<state>
                                 checks state and browser, takes over the fresh `jwt`
                                 cookie, verifies it with Wiki.js and opens a web session.
-4. GET/POST <base>/token        create, list and revoke personal tokens.
+4. GET  <base>/oauth/consent/<id>
+                                lets the signed-in user allow or deny an OAuth app.
+5. GET  <base>/apps             lists connected apps; POST <base>/apps/disconnect.
 """
 
 import html
@@ -38,7 +40,6 @@ LOGIN_COOKIE = "mcp_login"
 SESSION_COOKIE = "mcp_session"
 # A login must yield a JWT issued after it started (plus clock skew)
 FRESH_LOGIN_SLACK = 60
-TOKEN_TTL_CHOICES_DAYS = [7, 30, 90, 180, 365]
 WARN_BEFORE = 3 * 86400
 
 SECURITY_HEADERS = {
@@ -100,7 +101,7 @@ def _page(
 
 
 class WebRoutes:
-    """Login and token management pages under the MCP base path."""
+    """Login, consent and connected-apps pages under the MCP base path."""
 
     def __init__(
         self,
@@ -120,17 +121,12 @@ class WebRoutes:
         routes = [
             (f"{self.base}/login", ["GET"], self.login),
             (f"{self.base}/auth/callback/{{state}}", ["GET"], self.callback),
-            (f"{self.base}/token", ["GET"], self.token_page),
-            (f"{self.base}/token", ["POST"], self.create_token),
-            (f"{self.base}/token/revoke", ["POST"], self.revoke_token),
+            (f"{self.base}/apps", ["GET"], self.apps_page),
+            (f"{self.base}/apps/disconnect", ["POST"], self.disconnect_app),
             (f"{self.base}/logout", ["POST"], self.logout),
+            (f"{self.base}/oauth/consent/{{pending_id}}", ["GET"], self.consent),
+            (f"{self.base}/oauth/consent/{{pending_id}}", ["POST"], self.decide),
         ]
-        if self.config.oauth_enabled:
-            routes += [
-                (f"{self.base}/oauth/consent/{{pending_id}}", ["GET"], self.consent),
-                (f"{self.base}/oauth/consent/{{pending_id}}", ["POST"], self.decide),
-                (f"{self.base}/oauth/apps/revoke", ["POST"], self.revoke_app),
-            ]
         for path, methods, handler in routes:
             app.custom_route(path, methods=methods)(handler)
 
@@ -143,7 +139,7 @@ class WebRoutes:
 
     def _safe_next(self, value: str | None) -> str:
         """Only local paths under the base path; anything else is an open redirect."""
-        default = f"{self.base}/token"
+        default = f"{self.base}/apps"
         if (
             not value
             or not value.startswith(f"{self.base}/")
@@ -206,7 +202,7 @@ class WebRoutes:
 
     def _redirect_to_login(self) -> RedirectResponse:
         return RedirectResponse(
-            f"{self.base}/login?next={self.base}/token", status_code=303
+            f"{self.base}/login?next={self.base}/apps", status_code=303
         )
 
     # ------------------------------------------------------------------
@@ -282,26 +278,22 @@ class WebRoutes:
         await self.store.delete_web_session(request.cookies[SESSION_COOKIE])
         response = _page(
             "Signed out",
-            "<p>You are signed out of this page. Your personal tokens keep working "
-            "until they expire or you revoke them.</p>"
-            f"<p><a href='{self.base}/token'>Sign in again</a></p>",
+            "<p>You are signed out of this page. Your connected apps keep their "
+            "access until you disconnect them.</p>"
+            f"<p><a href='{self.base}/apps'>Sign in again</a></p>",
         )
         self._clear_cookie(response, SESSION_COOKIE)
         return response
 
     # ------------------------------------------------------------------
-    # Tokens
+    # Connected apps
     # ------------------------------------------------------------------
 
-    def _ttl_choices(self) -> list[int]:
-        max_days = self.config.pat_max_ttl // 86400
-        default_days = self.config.pat_default_ttl // 86400
-        choices = {d for d in TOKEN_TTL_CHOICES_DAYS if d <= max_days} | {default_days}
-        return sorted(c for c in choices if c > 0)
-
-    async def _render_tokens(self, session, created: str | None = None) -> HTMLResponse:
+    async def apps_page(self, request: Request) -> Response:
+        session = await self._session(request)
+        if session is None:
+            return self._redirect_to_login()
         now = self._now()
-        tokens = await self.store.list_tokens(session.wiki_user_id, kind="pat")
         relogin_at = session.login_at + self.config.session_max_age
         jwt_dies_at = session.jwt_exp + self.config.token_renewal
         csrf = html.escape(session.csrf_secret)
@@ -310,135 +302,71 @@ class WebRoutes:
             f"<p>Signed in as <strong>{html.escape(session.name)}</strong> "
             f"({html.escape(session.email)}).</p>"
         )
-        if created:
-            command = (
-                f"claude mcp add --transport http wikijs {self.config.mcp_url} \\\n"
-                f'  --header "Authorization: Bearer {created}"'
-            )
-            body += (
-                "<div class='ok'><p><strong>Your new token</strong> — copy it now, it "
-                "will not be shown again:</p>"
-                f"<pre>{html.escape(created)}</pre>"
-                "<p>Add it to Claude Code with:</p>"
-                f"<pre>{html.escape(command)}</pre></div>"
-            )
-
         notes = [
-            f"Your tokens act as you in the wiki until <strong>{_fmt(relogin_at)}</strong>; "
-            "after that, sign in here again (your tokens keep working once you do)."
+            "Your apps act as you in the wiki until "
+            f"<strong>{_fmt(relogin_at)}</strong>; after that they ask you to sign "
+            "in again."
         ]
         if relogin_at - now < WARN_BEFORE:
             notes.append("<strong>That is soon.</strong>")
         if jwt_dies_at < relogin_at:
             notes.append(
-                f"If none of your tokens is used before {_fmt(jwt_dies_at)}, the wiki "
-                "session lapses and you need to sign in here again."
+                f"If none of your apps is used before {_fmt(jwt_dies_at)}, they ask "
+                "you to sign in again sooner."
             )
         notes.append(
-            "Signing out of the wiki does not revoke these tokens; revoke them below."
+            "Signing out of the wiki does not disconnect apps; disconnect them below."
         )
         body += f"<p class='note'>{' '.join(notes)}</p>"
 
-        options = "".join(
-            f"<option value='{days}'{' selected' if days * 86400 == self.config.pat_default_ttl else ''}>"
-            f"{days} days</option>"
-            for days in self._ttl_choices()
-        )
+        command = f"claude mcp add --transport http wikijs {self.config.mcp_url}"
         body += (
-            "<h2>Create a personal token</h2>"
-            f"<form method='post' action='{self.base}/token'>"
-            f"<input type='hidden' name='csrf' value='{csrf}'>"
-            "<label>Name <input name='name' required maxlength='100' "
-            "placeholder='e.g. laptop'></label> "
-            f"<label>Valid for <select name='ttl_days'>{options}</select></label> "
-            "<button type='submit'>Create token</button></form>"
+            "<h2>Connect an app</h2>"
+            "<p>Add this address as an MCP server (or custom connector) in your app; "
+            "it then asks you to sign in here:</p>"
+            f"<pre>{html.escape(self.config.mcp_url)}</pre>"
+            f"<p>For Claude Code:</p><pre>{html.escape(command)}</pre>"
         )
 
-        body += "<h2>Your tokens</h2>"
-        if tokens:
-            rows = "".join(
-                f"<tr><td>{html.escape(t['name'])}</td>"
-                f"<td>{_fmt(t['created_at'])}</td><td>{_fmt(t['expires_at'])}</td>"
-                f"<td>{_fmt(t['last_used_at'])}</td><td>"
-                f"<form class='inline' method='post' action='{self.base}/token/revoke'>"
-                f"<input type='hidden' name='csrf' value='{csrf}'>"
-                f"<input type='hidden' name='token_id' value='{t['id']}'>"
-                "<button type='submit'>Revoke</button></form></td></tr>"
-                for t in tokens
-            )
+        body += "<h2>Connected apps</h2>"
+        grants = await self.store.list_oauth_grants(session.wiki_user_id)
+        if grants:
+            rows = ""
+            for grant in grants:
+                name, hosts = client_display(grant["client_info"])
+                rows += (
+                    f"<tr><td>{html.escape(name)}</td><td>{html.escape(hosts)}</td>"
+                    f"<td>{_fmt(grant['since'])}</td>"
+                    f"<td>{_fmt(grant['last_refresh'])}</td><td>"
+                    f"<form class='inline' method='post' action='{self.base}/apps/disconnect'>"
+                    f"<input type='hidden' name='csrf' value='{csrf}'>"
+                    f"<input type='hidden' name='client_id' value='{html.escape(grant['client_id'])}'>"
+                    "<button type='submit'>Disconnect</button></form></td></tr>"
+                )
             body += (
-                "<table><tr><th>Name</th><th>Created</th><th>Expires</th>"
-                f"<th>Last used</th><th></th></tr>{rows}</table>"
+                "<table><tr><th>App</th><th>Redirects to</th><th>Connected</th>"
+                f"<th>Last refreshed</th><th></th></tr>{rows}</table>"
             )
         else:
-            body += "<p>You have no active tokens.</p>"
-
-        if self.config.oauth_enabled:
-            body += await self._render_apps(session, csrf)
+            body += "<p>No apps are connected.</p>"
 
         body += (
             f"<h2>Sign out</h2><form method='post' action='{self.base}/logout'>"
             f"<input type='hidden' name='csrf' value='{csrf}'>"
             "<button type='submit'>Sign out of this page</button></form>"
         )
-        return _page("Wiki MCP tokens", body)
+        return _page("Wiki MCP apps", body)
 
-    async def _render_apps(self, session, csrf: str) -> str:
-        grants = await self.store.list_oauth_grants(session.wiki_user_id)
-        body = "<h2>Connected apps</h2>"
-        if not grants:
-            return body + "<p>No apps are connected through OAuth.</p>"
-        rows = ""
-        for grant in grants:
-            name, hosts = client_display(grant["client_info"])
-            rows += (
-                f"<tr><td>{html.escape(name)}</td><td>{html.escape(hosts)}</td>"
-                f"<td>{_fmt(grant['since'])}</td><td>{_fmt(grant['last_refresh'])}</td><td>"
-                f"<form class='inline' method='post' action='{self.base}/oauth/apps/revoke'>"
-                f"<input type='hidden' name='csrf' value='{csrf}'>"
-                f"<input type='hidden' name='client_id' value='{html.escape(grant['client_id'])}'>"
-                "<button type='submit'>Disconnect</button></form></td></tr>"
-            )
-        return body + (
-            "<table><tr><th>App</th><th>Redirects to</th><th>Connected</th>"
-            f"<th>Last refreshed</th><th></th></tr>{rows}</table>"
-        )
-
-    async def token_page(self, request: Request) -> Response:
-        session = await self._session(request)
-        if session is None:
-            return self._redirect_to_login()
-        return await self._render_tokens(session)
-
-    async def create_token(self, request: Request) -> Response:
+    async def disconnect_app(self, request: Request) -> Response:
         session, form = await self._form_session(request)
         if session is None:
             return self._redirect_to_login()
-        name = str(form.get("name", "")).strip()
-        try:
-            ttl_days = int(str(form.get("ttl_days", "")))
-        except ValueError:
-            ttl_days = 0
-        if not name or len(name) > 100 or ttl_days not in self._ttl_choices():
-            return self._error("Give the token a name and choose a validity period.")
-
-        _, token = await self.store.create_token(
-            session.wiki_user_id, name, ttl_days * 86400
+        client_id = str(form.get("client_id", ""))
+        await self.store.revoke_oauth_grant(session.wiki_user_id, client_id)
+        logger.info(
+            f"OAuth app {client_id} disconnected by wiki user {session.wiki_user_id}"
         )
-        logger.info(f"Token created for wiki user {session.wiki_user_id}")
-        return await self._render_tokens(session, created=token)
-
-    async def revoke_token(self, request: Request) -> Response:
-        session, form = await self._form_session(request)
-        if session is None:
-            return self._redirect_to_login()
-        try:
-            token_id = int(str(form.get("token_id", "")))
-        except ValueError:
-            return self._error("Unknown token.")
-        await self.store.revoke_token(session.wiki_user_id, token_id)
-        logger.info(f"Token {token_id} revoked by wiki user {session.wiki_user_id}")
-        return RedirectResponse(f"{self.base}/token", status_code=303)
+        return RedirectResponse(f"{self.base}/apps", status_code=303)
 
     # ------------------------------------------------------------------
     # OAuth consent (fase 5)
@@ -487,7 +415,7 @@ class WebRoutes:
             "Only continue if you just started connecting this app yourself and "
             "recognise that address.</p>"
             f"<p>The app keeps access until you disconnect it on the "
-            f"<a href='{self.base}/token'>token page</a>, or until "
+            f"<a href='{self.base}/apps'>apps page</a>, or until "
             f"{_fmt(session.login_at + self.config.session_max_age)} unless you sign "
             "in again.</p>"
             f"<form method='post' action='{self.base}/oauth/consent/{html.escape(pending_id)}'>"
@@ -529,14 +457,3 @@ class WebRoutes:
             str(params.redirect_uri), code=code, state=params.state
         )
         return RedirectResponse(target, status_code=303)
-
-    async def revoke_app(self, request: Request) -> Response:
-        session, form = await self._form_session(request)
-        if session is None:
-            return self._redirect_to_login()
-        client_id = str(form.get("client_id", ""))
-        await self.store.revoke_oauth_grant(session.wiki_user_id, client_id)
-        logger.info(
-            f"OAuth app {client_id} disconnected by wiki user {session.wiki_user_id}"
-        )
-        return RedirectResponse(f"{self.base}/token", status_code=303)

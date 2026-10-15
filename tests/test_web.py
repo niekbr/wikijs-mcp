@@ -1,5 +1,6 @@
 """Tests for the login flow and token management pages."""
 
+import json
 import re
 import time
 from unittest.mock import AsyncMock, patch
@@ -72,7 +73,7 @@ async def signed_in(http, store, user_id=3):
     await store.upsert_login(make_jwt(id=user_id), {**PROFILE, "id": user_id})
     session_id = await store.create_web_session(user_id, 3600)
     http.cookies.set(SESSION_COOKIE, session_id, domain="wiki.example.com", path="/mcp")
-    page = await http.get("/mcp/token")
+    page = await http.get("/mcp/apps")
     return re.search(r"name='csrf' value='([^']+)'", page.text).group(1)
 
 
@@ -112,17 +113,17 @@ class TestLogin:
     @pytest.mark.parametrize(
         "value,expected",
         [
-            ("/mcp/token", "/mcp/token"),
-            ("/mcp/token?x=1", "/mcp/token?x=1"),
-            (None, "/mcp/token"),
-            ("", "/mcp/token"),
-            ("https://evil.example/mcp/", "/mcp/token"),
-            ("//evil.example/mcp/", "/mcp/token"),
-            ("/other", "/mcp/token"),
-            ("/mcp", "/mcp/token"),
-            ("/mcp/\\evil", "/mcp/token"),
-            ("/mcp/x\r\nSet-Cookie: a=b", "/mcp/token"),
-            ("/mcp/https://evil", "/mcp/token"),
+            ("/mcp/apps", "/mcp/apps"),
+            ("/mcp/oauth/consent/abc", "/mcp/oauth/consent/abc"),
+            (None, "/mcp/apps"),
+            ("", "/mcp/apps"),
+            ("https://evil.example/mcp/", "/mcp/apps"),
+            ("//evil.example/mcp/", "/mcp/apps"),
+            ("/other", "/mcp/apps"),
+            ("/mcp", "/mcp/apps"),
+            ("/mcp/\\evil", "/mcp/apps"),
+            ("/mcp/x\r\nSet-Cookie: a=b", "/mcp/apps"),
+            ("/mcp/https://evil", "/mcp/apps"),
         ],
     )
     def test_safe_next(self, routes, value, expected):
@@ -138,12 +139,12 @@ class TestCallback:
         return await http.get(f"/mcp/auth/callback/{state}")
 
     async def test_success(self, http, store, wiki):
-        _, state = await start_login(http, "/mcp/token?welcome=1")
+        _, state = await start_login(http, "/mcp/apps?welcome=1")
 
         response = await self.complete(http, state)
 
         assert response.status_code == 303
-        assert response.headers["location"] == "/mcp/token?welcome=1"
+        assert response.headers["location"] == "/mcp/apps?welcome=1"
         cookies = set_cookies(response)
         session_cookie = next(c for c in cookies if c.startswith(f"{SESSION_COOKIE}="))
         assert "HttpOnly" in session_cookie and "Path=/mcp" in session_cookie
@@ -215,146 +216,127 @@ class TestCallback:
         assert (await store.get_user_for_token(token)).jwt == new_jwt
 
 
+CLIENT_INFO = json.dumps(
+    {
+        "client_id": "app-1",
+        "client_name": "Claude",
+        "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+    }
+)
+
+
+async def connect_app(store, user_id=3, client_id="app-1"):
+    """An OAuth app connected for a user: a refresh and an access token."""
+    await store.upsert_login(make_jwt(id=user_id), {**PROFILE, "id": user_id})
+    if await store.get_oauth_client(client_id) is None:
+        await store.save_oauth_client(
+            client_id, CLIENT_INFO.replace("app-1", client_id)
+        )
+    await store.create_refresh_token(client_id, user_id, ["wiki"])
+    _, access = await store.create_token(
+        user_id, "Claude", 3600, kind="oauth", client_id=client_id
+    )
+    return access
+
+
 @pytest.mark.unit
-class TestTokenPage:
+class TestAppsPage:
     async def test_requires_session(self, http):
-        response = await http.get("/mcp/token")
+        response = await http.get("/mcp/apps")
 
         assert response.status_code == 303
-        assert response.headers["location"] == "/mcp/login?next=/mcp/token"
+        assert response.headers["location"] == "/mcp/login?next=/mcp/apps"
+
+    async def test_no_personal_token_page(self, http, store):
+        await signed_in(http, store)
+
+        assert (await http.get("/mcp/token")).status_code == 404
+        assert (await http.post("/mcp/token", data={})).status_code == 404
 
     async def test_page(self, http, store):
         await signed_in(http, store)
 
-        response = await http.get("/mcp/token")
+        response = await http.get("/mcp/apps")
 
         assert response.status_code == 200
         assert "Lezer A" in response.text
-        assert "<option value='90' selected>" in response.text
-        assert "does not revoke these tokens" in response.text
-        assert response.headers["x-frame-options"] == "DENY"
-        # no-referrer would make browsers send `Origin: null` on form posts
-        assert response.headers["referrer-policy"] == "same-origin"
-        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
-
-    async def test_ttl_choices_respect_maximum(self, mock_wiki_config, store):
-        config = mock_wiki_config.model_copy(
-            update={"pat_max_ttl": 30 * 86400, "pat_default_ttl": 14 * 86400}
-        )
-
-        assert WebRoutes(config, store)._ttl_choices() == [7, 14, 30]
-
-    async def test_create_token(self, http, store):
-        csrf = await signed_in(http, store)
-
-        response = await http.post(
-            "/mcp/token",
-            data={"csrf": csrf, "name": "laptop", "ttl_days": "30"},
-            headers={"Origin": "https://wiki.example.com"},
-        )
-
-        assert response.status_code == 200
-        assert response.headers["cache-control"] == "no-store"
-        token = re.search(r"wikimcp_[\w-]+", response.text).group(0)
+        assert "https://wiki.example.com/mcp/" in response.text
         assert (
             "claude mcp add --transport http wikijs https://wiki.example.com/mcp/"
             in (response.text)
         )
-        user = await store.get_user_for_token(token)
-        assert user.wiki_user_id == 3
-        assert user.token_expires_at - time.time() == pytest.approx(30 * 86400, abs=5)
-        listed = await http.get("/mcp/token")
-        assert "laptop" in listed.text
-        assert token not in listed.text
+        assert "--header" not in response.text
+        assert "No apps are connected." in response.text
+        assert "does not disconnect apps" in response.text
+        # no-referrer would make browsers send `Origin: null` on form posts
+        assert response.headers["referrer-policy"] == "same-origin"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+    async def test_lists_connected_apps(self, http, store):
+        await connect_app(store)
+        await signed_in(http, store)
+
+        page = (await http.get("/mcp/apps")).text
+
+        assert "Claude" in page
+        assert "claude.ai" in page
+        assert "name='client_id' value='app-1'" in page
+
+    async def test_disconnect(self, http, store):
+        access = await connect_app(store)
+        csrf = await signed_in(http, store)
+
+        response = await http.post(
+            "/mcp/apps/disconnect",
+            data={"csrf": csrf, "client_id": "app-1"},
+            headers={"Origin": "https://wiki.example.com"},
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/mcp/apps"
+        assert await store.get_user_for_token(access) is None
+        assert await store.list_oauth_grants(3) == []
 
     @pytest.mark.parametrize(
         "data,headers",
         [
-            ({"csrf": "wrong", "name": "x", "ttl_days": "30"}, {}),
-            ({"name": "x", "ttl_days": "30"}, {}),
-            (
-                {"csrf": None, "name": "x", "ttl_days": "30"},
-                {"Origin": "https://evil.example"},
-            ),
+            ({"csrf": "wrong", "client_id": "app-1"}, {}),
+            ({"client_id": "app-1"}, {}),
+            ({"csrf": None, "client_id": "app-1"}, {"Origin": "https://evil.example"}),
+            ({"csrf": None, "client_id": "app-1"}, {"Origin": "null"}),
         ],
     )
-    async def test_create_token_needs_csrf_and_origin(self, http, store, data, headers):
+    async def test_disconnect_needs_csrf_and_origin(self, http, store, data, headers):
+        access = await connect_app(store)
         csrf = await signed_in(http, store)
-        if "csrf" in data and data["csrf"] is None:
+        if data.get("csrf", "") is None:
             data["csrf"] = csrf
 
-        response = await http.post("/mcp/token", data=data, headers=headers)
+        response = await http.post("/mcp/apps/disconnect", data=data, headers=headers)
 
         assert response.status_code == 303
-        assert await store.list_tokens(3) == []
+        assert "/mcp/login" in response.headers["location"]
+        assert await store.get_user_for_token(access) is not None
 
-    @pytest.mark.parametrize(
-        "name,ttl", [("", "30"), ("x" * 101, "30"), ("x", "1000"), ("x", "abc")]
-    )
-    async def test_create_token_validation(self, http, store, name, ttl):
-        csrf = await signed_in(http, store)
-
-        response = await http.post(
-            "/mcp/token", data={"csrf": csrf, "name": name, "ttl_days": ttl}
-        )
-
-        assert response.status_code == 400
-        assert await store.list_tokens(3) == []
-
-    async def test_browser_form_post_with_origin(self, http, store):
-        """Browsers send the page's origin on form posts; that must be accepted."""
-        csrf = await signed_in(http, store)
-
-        response = await http.post(
-            "/mcp/token",
-            data={"csrf": csrf, "name": "laptop", "ttl_days": "30"},
-            headers={"Origin": "https://wiki.example.com"},
-        )
-
-        assert response.status_code == 200
-        assert len(await store.list_tokens(3)) == 1
-
-    async def test_null_origin_rejected(self, http, store):
-        csrf = await signed_in(http, store)
-
-        response = await http.post(
-            "/mcp/token",
-            data={"csrf": csrf, "name": "laptop", "ttl_days": "30"},
-            headers={"Origin": "null"},
-        )
-
-        assert response.status_code == 303
-        assert await store.list_tokens(3) == []
-
-    async def test_revoke(self, http, store):
-        csrf = await signed_in(http, store)
-        token_id, token = await store.create_token(3, "laptop", 3600)
-
-        response = await http.post(
-            "/mcp/token/revoke", data={"csrf": csrf, "token_id": str(token_id)}
-        )
-
-        assert response.status_code == 303
-        assert await store.get_user_for_token(token) is None
-
-    async def test_cannot_revoke_other_users_token(self, http, store):
+    async def test_cannot_disconnect_other_users_app(self, http, store):
         await store.upsert_login(make_jwt(id=4), {**PROFILE, "id": 4})
-        other_id, other_token = await store.create_token(4, "theirs", 3600)
+        their_access = await connect_app(store, user_id=4)
         csrf = await signed_in(http, store, user_id=3)
 
         await http.post(
-            "/mcp/token/revoke", data={"csrf": csrf, "token_id": str(other_id)}
+            "/mcp/apps/disconnect", data={"csrf": csrf, "client_id": "app-1"}
         )
 
-        assert await store.get_user_for_token(other_token) is not None
+        assert await store.get_user_for_token(their_access) is not None
 
     async def test_logout(self, http, store):
+        access = await connect_app(store)
         csrf = await signed_in(http, store)
-        _, token = await store.create_token(3, "laptop", 3600)
 
         response = await http.post("/mcp/logout", data={"csrf": csrf})
 
         assert response.status_code == 200
-        assert "keep working" in response.text
-        assert (await http.get("/mcp/token")).status_code == 303
-        assert await store.get_user_for_token(token) is not None
+        assert "keep their access" in response.text
+        assert (await http.get("/mcp/apps")).status_code == 303
+        assert await store.get_user_for_token(access) is not None

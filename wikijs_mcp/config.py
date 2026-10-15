@@ -40,21 +40,16 @@ class WikiJSConfig(BaseModel):
     default_locale: str = Field(default="")
     token_renewal: int = Field(default=parse_duration("14d"))
     session_max_age: int = Field(default=parse_duration("30d"))
-    pat_default_ttl: int = Field(default=parse_duration("90d"))
-    pat_max_ttl: int = Field(default=parse_duration("365d"))
     html_timeout: float = Field(default=10.0)
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=8000)
     forwarded_allow_ips: str = Field(default="127.0.0.1")
     read_only: bool = Field(default=True)
-    oauth_enabled: bool = Field(default=False)
     debug: bool = Field(default=False)
 
     @field_validator(
         "token_renewal",
         "session_max_age",
-        "pat_default_ttl",
-        "pat_max_ttl",
         mode="before",
     )
     @classmethod
@@ -74,14 +69,11 @@ class WikiJSConfig(BaseModel):
             "encryption_key": os.getenv("WIKIJS_MCP_ENCRYPTION_KEY", ""),
             "default_locale": os.getenv("WIKIJS_DEFAULT_LOCALE", ""),
             "read_only": _env_bool("WIKIJS_MCP_READ_ONLY", True),
-            "oauth_enabled": _env_bool("WIKIJS_MCP_OAUTH", False),
             "debug": _env_bool("DEBUG", False),
         }
         optional = {
             "token_renewal": "WIKIJS_TOKEN_RENEWAL",
             "session_max_age": "WIKIJS_MCP_SESSION_MAX_AGE",
-            "pat_default_ttl": "WIKIJS_MCP_PAT_DEFAULT_TTL",
-            "pat_max_ttl": "WIKIJS_MCP_PAT_MAX_TTL",
             "html_timeout": "WIKIJS_HTML_TIMEOUT",
             "host": "WIKIJS_MCP_HOST",
             "port": "WIKIJS_MCP_PORT",
@@ -105,11 +97,6 @@ class WikiJSConfig(BaseModel):
     def mcp_url(self) -> str:
         """Public URL of the MCP endpoint."""
         return f"{self.public_url.rstrip('/')}{self.mcp_base_path.rstrip('/')}/"
-
-    @property
-    def login_url(self) -> str:
-        """Public URL where users (re)connect their Wiki.js account."""
-        return f"{self.public_url.rstrip('/')}{self.mcp_base_path.rstrip('/')}/login"
 
     def validate_config(self, only: list[str] | None = None) -> None:
         """Validate that required configuration is present.
@@ -139,7 +126,3 @@ class WikiJSConfig(BaseModel):
                 ) from e
         if not self.mcp_base_path.startswith("/"):
             raise ValueError("WIKIJS_MCP_BASE_PATH must start with '/'")
-        if self.pat_default_ttl > self.pat_max_ttl:
-            raise ValueError(
-                "WIKIJS_MCP_PAT_DEFAULT_TTL cannot exceed WIKIJS_MCP_PAT_MAX_TTL"
-            )

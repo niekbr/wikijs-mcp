@@ -157,7 +157,11 @@ class WikiOAuthProvider:
     async def _issue(
         self, client_id: str, wiki_user_id: int, scopes: list[str]
     ) -> OAuthToken:
-        if not await self.store.user_login_is_current(wiki_user_id):
+        # Also refuse when the stored Wiki.js session lapsed: the client then runs
+        # the authorization flow again, and the user signs in to the wiki anew
+        if not await self.store.user_login_is_current(
+            wiki_user_id, self.config.token_renewal
+        ):
             raise TokenError("invalid_grant", "The wiki login has expired")
         client = await self.get_client(client_id)
         name = (client.client_name if client else None) or client_id

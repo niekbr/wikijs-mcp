@@ -255,6 +255,14 @@ class Store:
         await self.db.commit()
         return cursor.rowcount == 1
 
+    async def forget_jwt(self, wiki_user_id: int) -> None:
+        """Drop a JWT Wiki.js no longer accepts; the user must sign in again."""
+        await self.db.execute(
+            "UPDATE users SET jwt_encrypted = NULL WHERE wiki_user_id = ?",
+            (wiki_user_id,),
+        )
+        await self.db.commit()
+
     async def delete_user(self, wiki_user_id: int) -> None:
         """Forget a user, their JWT, tokens and web sessions."""
         await self.db.execute(
@@ -545,14 +553,17 @@ class Store:
         await self.db.commit()
         return cursor.rowcount == 1
 
-    async def user_login_is_current(self, wiki_user_id: int) -> bool:
-        """Whether the user's last SSO login is within session_max_age."""
+    async def user_login_is_current(self, wiki_user_id: int, jwt_renewal: int) -> bool:
+        """Whether the user's last SSO login is within session_max_age and the stored
+        Wiki.js JWT can still be renewed (it lapses after `jwt_renewal` unused)."""
+        now = self._now()
         async with self.db.execute(
             """
             SELECT 1 FROM users
             WHERE wiki_user_id = ? AND login_at > ? AND jwt_encrypted IS NOT NULL
+              AND jwt_exp + ? > ?
             """,
-            (wiki_user_id, self._now() - self._session_max_age),
+            (wiki_user_id, now - self._session_max_age, jwt_renewal, now),
         ) as cursor:
             return await cursor.fetchone() is not None
 

@@ -13,7 +13,7 @@ natural language, with exactly the rights that user has in Wiki.js.
 ## How it works
 
 ```
-Claude ──Bearer token──▶ nginx ──/mcp/──▶ wikijs-mcp ──user's Wiki.js JWT──▶ Wiki.js
+Claude ──OAuth token──▶ nginx ──/mcp/──▶ wikijs-mcp ──user's Wiki.js JWT──▶ Wiki.js
                           │                    ▲
                           └──── everything else ──────────────────────────▶ Wiki.js
 ```
@@ -21,14 +21,11 @@ Claude ──Bearer token──▶ nginx ──/mcp/──▶ wikijs-mcp ──u
 - The MCP server lives under `/mcp/` on the **same host name as the wiki**. That is
   required: after a user signs in through Wiki.js, the server takes over Wiki.js's
   login cookie.
-- **Signing in:** `https://wiki.example.com/mcp/login` sends the user through the
-  normal Wiki.js login (and so through your identity provider). The server stores the
-  resulting Wiki.js session, encrypted.
-- **Connecting a client:**
-  - **Personal token:** on `/mcp/token` users create a token for clients that can
-    send a header, such as Claude Code.
-  - **OAuth:** clients such as claude.ai and Claude Desktop connect through OAuth
-    (`WIKIJS_MCP_OAUTH=true`). They show the same login, then a consent screen.
+- **Connecting a client:** clients connect through OAuth: Claude Code, claude.ai and
+  Claude Desktop. When a user adds the server, the client opens the normal Wiki.js
+  login (and so your identity provider), and then a consent screen. The server
+  stores the resulting Wiki.js session, encrypted. There are no personal tokens to
+  copy around.
 - **Rights:** Wiki.js decides everything — groups, page rules, deactivated accounts.
   The server has no API key and no permission logic of its own. A page you may not
   see behaves as if it does not exist.
@@ -125,12 +122,12 @@ Add [deploy/nginx/wikijs-mcp.conf](deploy/nginx/wikijs-mcp.conf) to the proxy:
 Then set the upstream address to the Wiki.js container, and run
 `nginx -t && systemctl reload nginx`.
 
-The two `/.well-known/...` locations are only needed with OAuth. Everything else under
-`/.well-known` stays with Wiki.js.
+The two `/.well-known/...` locations are required: MCP clients discover the sign-in
+through them. Everything else under `/.well-known` stays with Wiki.js.
 
 ### 5. Check
 
-- `https://wiki.example.com/mcp/login` → the wiki's login → the token page.
+- `https://wiki.example.com/mcp/apps` → the wiki's login → the connected-apps page.
 - `curl -i -X POST https://wiki.example.com/mcp/` → `401` with a `WWW-Authenticate`
   header.
 
@@ -147,17 +144,7 @@ The database schema is upgraded automatically. To back it up, back up
 
 ## Using it
 
-### Claude Code: personal token
-
-Open `https://wiki.example.com/mcp/token`, create a token and run the command shown
-there:
-
-```bash
-claude mcp add --transport http wikijs https://wiki.example.com/mcp/ \
-  --header "Authorization: Bearer wikimcp_..."
-```
-
-### Claude Code: OAuth
+### Claude Code
 
 ```bash
 claude mcp add --transport http wikijs https://wiki.example.com/mcp/
@@ -168,34 +155,36 @@ wiki and allow access.
 
 ### claude.ai and Claude Desktop
 
-Add a custom connector with the URL `https://wiki.example.com/mcp/` (OAuth must be
-enabled). The wiki has to be reachable from the internet for claude.ai.
+Add a custom connector with the URL `https://wiki.example.com/mcp/`. The wiki has to
+be reachable from the internet for claude.ai.
 
-### Revoking access
+### Disconnecting
 
-On `/mcp/token`, revoke personal tokens or disconnect OAuth apps. Deactivating a user
-in Wiki.js also stops their access at once.
+`https://wiki.example.com/mcp/apps` lists a user's connected apps, each with a
+**Disconnect** button. Deactivating a user in Wiki.js also stops their access at
+once.
 
 ## Sessions and lifetimes
 
-- **Wiki session:** the stored Wiki.js session lapses when none of a user's tokens is
+- **Wiki session:** the stored Wiki.js session lapses when none of a user's apps is
   used for longer than the Token Renewal Period (Wiki.js default: 14 days). There is
   deliberately no background job that keeps it alive.
 - **Sign-in:** at most `WIKIJS_MCP_SESSION_MAX_AGE` (default 30 days) after the last
-  sign-in, users must sign in again at `/mcp/login`, even when they use the server
-  daily. That way your identity provider stays in control (e.g. for removed accounts
-  or MFA).
-- **Tokens:** signing in again does not invalidate tokens; they work again right
-  away. Personal tokens always expire (default 90 days, at most 365). OAuth access
-  tokens last 1 hour, and refresh tokens rotate on every use.
-- **Logging out of the wiki** does not revoke MCP tokens. Revoke them on `/mcp/token`.
+  sign-in, users must sign in again, even when they use the server daily. That way
+  your identity provider stays in control (e.g. for removed accounts or MFA).
+- **Signing in again:** when the wiki session lapses, the sign-in is too old, or Wiki.js
+  rejects the session (e.g. a deactivated account), the server answers the app with
+  `401`. The app then runs the sign-in again by itself. In Claude Code: `/mcp` →
+  re-authenticate.
+- **Tokens:** OAuth access tokens last 1 hour, and refresh tokens rotate on every use.
+- **Logging out of the wiki** does not disconnect apps. Disconnect them on `/mcp/apps`.
 
 ## Security notes
 
 - **Encryption:** stored Wiki.js sessions are encrypted with `WIKIJS_MCP_ENCRYPTION_KEY`.
   This mainly protects a **leaked copy of the database** (e.g. a backup). Someone with
   access to the running container also has the key.
-- **Hashing:** MCP tokens, refresh tokens, authorization codes and web session ids are
+- **Hashing:** access tokens, refresh tokens, authorization codes and web session ids are
   stored only as SHA-256 hashes.
 - **Logs:** they never contain tokens, Wiki.js sessions or page content. Each tool
   call writes one audit line to the `wikijs_mcp.audit` logger (user, tool, path or
@@ -205,7 +194,7 @@ in Wiki.js also stops their access at once.
   - Only a Wiki.js session issued during that very sign-in is accepted, so an old wiki
     cookie cannot bypass the identity provider.
   - Redirects after sign-in stay under `/mcp/`.
-- **Web pages:** the sign-in and token pages use CSRF tokens, origin checks, a strict
+- **Web pages:** the sign-in, consent and apps pages use CSRF tokens, origin checks, a strict
   Content Security Policy and `Cache-Control: no-store`.
 - **OAuth:**
   - Registration is open (as MCP clients expect).
@@ -242,13 +231,11 @@ docker compose -f deploy/dev/docker-compose.yml up -d
 
 Run the server with `WIKIJS_URL=http://127.0.0.1:3080`,
 `WIKIJS_PUBLIC_URL=http://127.0.0.1:3090`, `WIKIJS_STRATEGY_KEY=local`,
-`WIKIJS_MCP_PORT=8765` (plus a database path and key), then open
-`http://127.0.0.1:3090/mcp/login`.
+`WIKIJS_MCP_PORT=8765` (plus a database path and key). Then connect a client to
+`http://127.0.0.1:3090/mcp/` (the repository's `.mcp.json` does this for Claude
+Code), and sign in with a test account using the local login.
 
-Other ways to run it during development:
-- `wikijs-mcp dev-token --jwt-file <file>` stores a Wiki.js JWT and prints a personal
-  token, without the web login.
-- `wikijs-mcp stdio --dev-jwt-file <file>` runs over stdio as one user.
+`wikijs-mcp stdio --dev-jwt-file <file>` runs over stdio as one user, without OAuth.
 
 [FASE0-RESULTATEN.md](FASE0-RESULTATEN.md) records how Wiki.js 2.5 behaves; the
 server's design rests on it.

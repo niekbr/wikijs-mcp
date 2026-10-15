@@ -11,7 +11,7 @@ from starlette.testclient import TestClient
 
 from tests.conftest import TEST_FERNET_KEY
 from tests.helpers import make_jwt
-from wikijs_mcp import auth
+from wikijs_mcp import auth, wiki_jwt
 from wikijs_mcp.auth import (
     SessionUser,
     StoreTokenVerifier,
@@ -495,8 +495,32 @@ class TestErrorsAndAudit:
     async def test_expired_session(self, server, client):
         client.list_tags.side_effect = WikiAuthExpired("expired")
 
-        with pytest.raises(ToolError, match="session has expired.*/mcp/login"):
+        with pytest.raises(ToolError, match="session has expired.*re-authenticate"):
             await server.app.call_tool("wiki_list_tags", {})
+
+    @pytest.mark.parametrize("error", [WikiAuthExpired("x"), WikiAuthRevoked("x")])
+    async def test_lost_session_is_forgotten(self, mock_wiki_config, client, error):
+        """So the next request gets a 401 and the client signs in again."""
+        lost = AsyncMock()
+        user = SessionUser(3, "a@example.com", make_jwt(), AsyncMock(), lost)
+        server = make_server(mock_wiki_config, user)
+        client.list_tags.side_effect = error
+
+        with pytest.raises(ToolError):
+            await server.app.call_tool("wiki_list_tags", {})
+
+        lost.assert_awaited_once()
+
+    async def test_other_errors_keep_the_session(self, mock_wiki_config, client):
+        lost = AsyncMock()
+        user = SessionUser(3, "a@example.com", make_jwt(), AsyncMock(), lost)
+        server = make_server(mock_wiki_config, user)
+        client.list_tags.side_effect = WikiForbidden("x")
+
+        with pytest.raises(ToolError):
+            await server.app.call_tool("wiki_list_tags", {})
+
+        lost.assert_not_called()
 
     async def test_revoked_session(self, server, client):
         client.list_tags.side_effect = WikiAuthRevoked("Unauthorized")
@@ -570,28 +594,67 @@ class TestAuth:
     async def stored_user(self, store, jwt=None):
         jwt = jwt or make_jwt(id=3)
         await store.upsert_login(jwt, {"id": 3, "email": "a@example.com", "name": "A"})
-        token_id, token = await store.create_token(3, "laptop", 3600)
+        token_id, token = await store.create_token(
+            3, "Claude", 3600, kind="oauth", client_id="app-1"
+        )
         return jwt, token_id, token
 
-    async def test_verifier_accepts_valid_token(self, store):
+    def verifier(self, store, clock=None):
+        return StoreTokenVerifier(
+            store, 14 * 86400, **({"clock": clock} if clock else {})
+        )
+
+    async def test_verifier_accepts_oauth_token(self, store):
         _, token_id, token = await self.stored_user(store)
 
-        access = await StoreTokenVerifier(store).verify_token(token)
+        access = await self.verifier(store).verify_token(token)
 
         assert access.subject == "3"
-        assert access.client_id == "pat"
+        assert access.client_id == "app-1"
         assert access.token == token
         assert (await store.list_tokens(3))[0]["last_used_at"] is not None
 
     async def test_verifier_rejects_unknown_token(self, store):
-        assert await StoreTokenVerifier(store).verify_token("wikimcp_nope") is None
+        assert await self.verifier(store).verify_token("wikimcp_nope") is None
+
+    async def test_verifier_rejects_personal_tokens(self, store):
+        """Only OAuth: personal tokens from earlier versions no longer work."""
+        await self.stored_user(store)
+        _, pat = await store.create_token(3, "laptop", 3600, kind="pat")
+
+        assert await self.verifier(store).verify_token(pat) is None
+
+    async def test_verifier_rejects_token_when_wiki_session_lapsed(self, store):
+        """The client then gets a 401 and runs the OAuth flow (and wiki login) again."""
+        jwt, _, token = await self.stored_user(store)
+        lapsed_at = wiki_jwt.expires_at(jwt) + 14 * 86400
+
+        assert await self.verifier(store, clock=lambda: lapsed_at - 1).verify_token(
+            token
+        )
+        assert (
+            await self.verifier(store, clock=lambda: lapsed_at + 1).verify_token(token)
+            is None
+        )
+
+    async def test_verifier_rejects_token_after_session_lost(self, store, monkeypatch):
+        _, _, token = await self.stored_user(store)
+        monkeypatch.setattr(
+            auth,
+            "get_access_token",
+            lambda: AccessToken(token=token, client_id="app-1", scopes=[]),
+        )
+
+        await (await token_user_source(store)()).on_session_lost()
+
+        assert await self.verifier(store).verify_token(token) is None
 
     async def test_token_user_source(self, store, monkeypatch):
         jwt, _, token = await self.stored_user(store)
         monkeypatch.setattr(
             auth,
             "get_access_token",
-            lambda: AccessToken(token=token, client_id="pat", scopes=[]),
+            lambda: AccessToken(token=token, client_id="app-1", scopes=[]),
         )
 
         user = await token_user_source(store)()
@@ -614,7 +677,7 @@ class TestAuth:
         monkeypatch.setattr(
             auth,
             "get_access_token",
-            lambda: AccessToken(token=token, client_id="pat", scopes=[]),
+            lambda: AccessToken(token=token, client_id="app-1", scopes=[]),
         )
 
         with pytest.raises(WikiAuthExpired):
@@ -676,8 +739,10 @@ class TestHttpApp:
 
         assert response.status_code == 401
         assert response.headers["www-authenticate"].startswith("Bearer")
-        # No OAuth metadata until fase 5
-        assert "resource_metadata" not in response.headers["www-authenticate"]
+        assert (
+            'resource_metadata="https://wiki.example.com/.well-known/'
+            'oauth-protected-resource/mcp/"' in response.headers["www-authenticate"]
+        )
 
     def test_rejects_unknown_token(self, http):
         assert self.initialize(http, "bad").status_code == 401

@@ -675,6 +675,39 @@ Wiki.js-LXC** (keuze gebruiker). OAuth staat meteen aan.
 
 ---
 
+## Wijziging na fase 6: alleen OAuth (2026-10-15, keuze gebruiker)
+
+Persoonlijke tokens zijn volledig verwijderd; OAuth is de enige manier om te verbinden
+(ook voor Claude Code). Dit gaat vóór wat in fase 2 t/m 5 over persoonlijke tokens
+staat.
+
+- **Pagina's:** `/mcp/token` (tokens maken en intrekken) is weg. Daarvoor in de plaats
+  komt `/mcp/apps`: "signed in as …", hoe je een app verbindt, de verbonden apps met
+  **Disconnect**, en tot wanneer opnieuw inloggen nodig is. Na het inloggen kom je daar
+  standaard terecht.
+- **Configuratie:** `WIKIJS_MCP_OAUTH`, `WIKIJS_MCP_PAT_DEFAULT_TTL` en
+  `WIKIJS_MCP_PAT_MAX_TTL` vervallen. De OAuth-routes en de twee `/.well-known`-
+  locaties zijn altijd nodig.
+- **CLI:** de opdracht `dev-token` is weg. Voor ontwikkeling blijft `stdio
+  --dev-jwt-file` bestaan.
+- **Verifier:** `StoreTokenVerifier` accepteert alleen tokens met `kind='oauth'`.
+  Persoonlijke tokens uit oude databases krijgen een 401.
+- **Dicht gat — sessie verlopen terwijl de refresh token nog geldig was:** als de
+  opgeslagen Wiki.js-JWT niet meer te vernieuwen is (14 dagen ongebruikt) of gewist
+  is, weigeren de verifier en de refresh. De client krijgt dan een 401 of
+  `invalid_grant` en start de OAuth-flow (dus ook de Wiki.js-login) zelf opnieuw.
+  Voorheen bleef de client nieuwe access tokens krijgen terwijl elke tool-call faalde.
+- **Sessie verloren:** krijgt een tool-call `WikiAuthExpired` of `WikiAuthRevoked`, dan
+  wordt de opgeslagen JWT gewist (`store.forget_jwt`). De volgende aanvraag krijgt een
+  401 en de client logt opnieuw in. Bij een gedeactiveerd account mislukt dat inloggen
+  bij Wiki.js, zoals het hoort.
+- **Meldingen:** de foutmeldingen van de tools verwijzen naar opnieuw verbinden in de
+  client, in Claude Code via `/mcp` → re-authenticate.
+- **Getest:** `tests/` (met opzettelijke fouten als controle op de nieuwe beveiligingen)
+  en end-to-end met de OAuth-client van de SDK via de dev-proxy.
+
+---
+
 ## Fase 7: verificatie (verplicht voor oplevering)
 
 Automatiseer waar het kan, met de dev-wiki en de testaccounts uit fase 0

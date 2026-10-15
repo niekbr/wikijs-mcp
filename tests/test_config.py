@@ -30,15 +30,16 @@ class TestWikiJSConfig:
         assert config.mcp_base_path == "/mcp"
         assert config.token_renewal == 14 * 86400
         assert config.session_max_age == 30 * 86400
-        assert config.pat_default_ttl == 90 * 86400
-        assert config.pat_max_ttl == 365 * 86400
         assert config.html_timeout == 10.0
         assert config.read_only is True
         assert config.debug is False
 
     def test_no_api_key(self):
-        """The server never holds a Wiki.js API key."""
+        """The server never holds a Wiki.js API key, and has no personal tokens."""
         assert "api_key" not in WikiJSConfig.model_fields
+        assert not {"pat_default_ttl", "pat_max_ttl", "oauth_enabled"} & set(
+            WikiJSConfig.model_fields
+        )
         assert not hasattr(WikiJSConfig(), "headers")
 
     def test_durations_accept_strings(self):
@@ -121,12 +122,6 @@ class TestWikiJSConfig:
         with pytest.raises(ValueError, match="WIKIJS_MCP_BASE_PATH"):
             config.validate_config()
 
-    def test_validate_config_pat_ttls(self):
-        config = WikiJSConfig(**{**VALID, "pat_default_ttl": "400d"})
-
-        with pytest.raises(ValueError, match="PAT_DEFAULT_TTL"):
-            config.validate_config()
-
     def test_load_config_from_env_vars(self):
         """Test loading config from environment variables."""
         env_vars = {
@@ -140,8 +135,6 @@ class TestWikiJSConfig:
             "WIKIJS_DEFAULT_LOCALE": "nl",
             "WIKIJS_TOKEN_RENEWAL": "7d",
             "WIKIJS_MCP_SESSION_MAX_AGE": "10d",
-            "WIKIJS_MCP_PAT_DEFAULT_TTL": "30d",
-            "WIKIJS_MCP_PAT_MAX_TTL": "60d",
             "WIKIJS_HTML_TIMEOUT": "5",
             "WIKIJS_MCP_READ_ONLY": "false",
             "DEBUG": "true",
@@ -160,8 +153,6 @@ class TestWikiJSConfig:
         assert config.default_locale == "nl"
         assert config.token_renewal == 7 * 86400
         assert config.session_max_age == 10 * 86400
-        assert config.pat_default_ttl == 30 * 86400
-        assert config.pat_max_ttl == 60 * 86400
         assert config.html_timeout == 5.0
         assert config.read_only is False
         assert config.debug is True

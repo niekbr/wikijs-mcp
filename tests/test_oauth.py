@@ -21,6 +21,7 @@ BASE = "https://wiki.example.com"
 REDIRECT = "https://claude.ai/api/mcp/auth_callback"
 PROFILE = {"id": 3, "name": "Lezer A", "email": "a@example.com"}
 MAX_AGE = 30 * 86400
+RENEWAL = 14 * 86400
 
 
 class Clock:
@@ -46,7 +47,7 @@ async def store(tmp_path, clock):
 
 @pytest.fixture
 def oauth_config(mock_wiki_config):
-    return mock_wiki_config.model_copy(update={"oauth_enabled": True})
+    return mock_wiki_config
 
 
 @pytest.fixture
@@ -171,21 +172,9 @@ class TestMetadata:
             in response.headers["www-authenticate"]
         )
 
-    async def test_personal_token_page_unaffected(self, http):
-        """<base>/token is the token page, not the OAuth token endpoint."""
-        response = await http.get("/mcp/token")
-
-        assert response.status_code == 303
-        assert response.headers["location"].startswith("/mcp/login")
-
-    async def test_disabled_by_default(self, mock_wiki_config, store):
-        app = build_http_app(mock_wiki_config, store)
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url=BASE
-        ) as http:
-            assert (await http.post("/mcp/oauth/register", json={})).status_code == 404
-            response = await http.post("/mcp/", json={})
-            assert "resource_metadata" not in response.headers["www-authenticate"]
+    async def test_no_personal_token_page(self, http):
+        """Only OAuth: <base>/token is gone; the OAuth endpoint is <base>/oauth/token."""
+        assert (await http.get("/mcp/token")).status_code == 404
 
 
 @pytest.mark.unit
@@ -250,7 +239,9 @@ class TestAuthorizationFlow:
         assert tokens["token_type"] == "Bearer"
         assert tokens["expires_in"] == 3600
         assert tokens["scope"] == "wiki"
-        access = await StoreTokenVerifier(store).verify_token(tokens["access_token"])
+        access = await StoreTokenVerifier(store, RENEWAL).verify_token(
+            tokens["access_token"]
+        )
         assert access.subject == "3"
         assert access.client_id == client_id
 
@@ -387,6 +378,22 @@ class TestRefreshAndRevoke:
 
         assert response.status_code == 400
 
+    async def test_refresh_stops_when_wiki_session_lapsed(self, http, store, clock):
+        """Unused for longer than the renewal period: the stored Wiki.js session is
+        dead, so refreshing fails and the client signs the user in again."""
+        client_id, tokens = await full_flow(http, store)
+        clock.now += 1800 + RENEWAL + 1  # past the JWT's exp plus renewal period
+
+        response = await token_request(
+            http,
+            grant_type="refresh_token",
+            refresh_token=tokens["refresh_token"],
+            client_id=client_id,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_grant"
+
     async def test_revoke_ends_the_grant(self, http, store):
         client_id, tokens = await full_flow(http, store)
 
@@ -401,7 +408,10 @@ class TestRefreshAndRevoke:
 
         assert response.status_code == 200
         assert (
-            await StoreTokenVerifier(store).verify_token(tokens["access_token"]) is None
+            await StoreTokenVerifier(store, RENEWAL).verify_token(
+                tokens["access_token"]
+            )
+            is None
         )
         refreshed = await token_request(
             http,
@@ -413,31 +423,32 @@ class TestRefreshAndRevoke:
 
 
 @pytest.mark.unit
-class TestTokenPage:
-    async def test_lists_app_but_not_its_access_tokens(self, http, store):
+class TestAppsPage:
+    async def test_lists_app(self, http, store):
         await full_flow(http, store)
-        _, pat = await store.create_token(3, "laptop", 3600)
 
-        page = (await http.get("/mcp/token")).text
+        page = (await http.get("/mcp/apps")).text
 
         assert "Connected apps" in page
         assert "Claude" in page and "claude.ai" in page
-        assert page.count("name='token_id'") == 1  # only the personal token
 
     async def test_disconnect(self, http, store):
         client_id, tokens = await full_flow(http, store)
-        page = (await http.get("/mcp/token")).text
+        page = (await http.get("/mcp/apps")).text
         csrf = re.search(r"name='csrf' value='([^']+)'", page).group(1)
 
         response = await http.post(
-            "/mcp/oauth/apps/revoke", data={"csrf": csrf, "client_id": client_id}
+            "/mcp/apps/disconnect", data={"csrf": csrf, "client_id": client_id}
         )
 
         assert response.status_code == 303
         assert (
-            await StoreTokenVerifier(store).verify_token(tokens["access_token"]) is None
+            await StoreTokenVerifier(store, RENEWAL).verify_token(
+                tokens["access_token"]
+            )
+            is None
         )
-        assert "No apps are connected" in (await http.get("/mcp/token")).text
+        assert "No apps are connected" in (await http.get("/mcp/apps")).text
 
 
 @pytest.mark.unit

@@ -28,7 +28,7 @@ from .auth import (
     token_user_source,
 )
 from .client import WikiJSClient
-from .config import WikiJSConfig, parse_duration
+from .config import WikiJSConfig
 from .errors import (
     WikiAuthExpired,
     WikiAuthRevoked,
@@ -126,18 +126,13 @@ class WikiJSMCPServer:
         self._setup_tools()
 
     def _auth_settings(self) -> AuthSettings:
-        if self.config.oauth_enabled:
-            # Advertise our authorization server: WWW-Authenticate then points to
-            # /.well-known/oauth-protected-resource<base>/, served by the SDK
-            return AuthSettings(
-                issuer_url=issuer_url(self.config),
-                resource_server_url=self.config.mcp_url,
-                validate_token_resource=False,  # personal tokens have no resource
-            )
-        # Resource server only: no OAuth metadata, personal tokens only
+        # Advertise our authorization server: WWW-Authenticate then points to
+        # /.well-known/oauth-protected-resource<base>/, served by the SDK
         return AuthSettings(
-            issuer_url=self.config.public_url.rstrip("/") + self.config.mcp_base_path,
-            resource_server_url=None,
+            issuer_url=issuer_url(self.config),
+            resource_server_url=self.config.mcp_url,
+            # Tokens are only valid here anyway; the verifier checks them
+            validate_token_resource=False,
         )
 
     # ------------------------------------------------------------------
@@ -148,13 +143,14 @@ class WikiJSMCPServer:
         if isinstance(error, WikiAuthRevoked):
             return (
                 "The wiki no longer accepts this session: the account may have been "
-                "deactivated or its access revoked. Log in again at "
-                f"{self.config.login_url}; if that fails, contact a wiki administrator."
+                "deactivated or its access revoked. Reconnect the wiki in your MCP "
+                "client (in Claude Code: /mcp, then re-authenticate) to sign in "
+                "again; if that fails, contact a wiki administrator."
             )
         if isinstance(error, WikiAuthExpired):
             return (
-                "The wiki session has expired. Log in again at "
-                f"{self.config.login_url} and retry."
+                "The wiki session has expired. Reconnect the wiki in your MCP client "
+                "(in Claude Code: /mcp, then re-authenticate) to sign in again."
             )
         if isinstance(error, WikiForbidden | WikiNotFound):
             message = f"No access to {target}, or it does not exist."
@@ -168,6 +164,7 @@ class WikiJSMCPServer:
         """One Wiki.js client for one tool call, with error mapping and auditing."""
         audit = {"tool": tool, "target": target, "user_id": None, "email": None}
         outcome = "error"
+        user = None
         try:
             if self._user_source is None:
                 raise WikiAuthExpired("No user source configured")
@@ -177,6 +174,11 @@ class WikiJSMCPServer:
                 yield client
             outcome = "ok"
         except WikiError as e:
+            if isinstance(e, WikiAuthExpired | WikiAuthRevoked) and user is not None:
+                # Forget the session, so the next request gets a 401 and the client
+                # runs the OAuth flow (and the wiki login) again
+                if user.on_session_lost:
+                    await user.on_session_lost()
             outcome = (
                 "expired"
                 if isinstance(e, WikiAuthExpired | WikiAuthRevoked)
@@ -772,16 +774,15 @@ class WikiJSMCPServer:
 
 
 def build_http_app(config: WikiJSConfig, store: Store) -> Starlette:
-    """The complete HTTP app: MCP endpoint, web pages and (optionally) OAuth."""
+    """The complete HTTP app: MCP endpoint, OAuth and the web pages."""
     server = WikiJSMCPServer(
         config,
         user_source=token_user_source(store),
-        token_verifier=StoreTokenVerifier(store),
+        token_verifier=StoreTokenVerifier(store, config.token_renewal),
     )
     WebRoutes(config, store).register(server.app)
     app = server.app.streamable_http_app()
-    if config.oauth_enabled:
-        app.router.routes.extend(oauth_routes(config, WikiOAuthProvider(config, store)))
+    app.router.routes.extend(oauth_routes(config, WikiOAuthProvider(config, store)))
     return app
 
 
@@ -828,25 +829,6 @@ async def _verified_profile(config: WikiJSConfig, jwt: str) -> dict:
     return profile
 
 
-async def _dev_token(config: WikiJSConfig, jwt_file: str, name: str, ttl: str) -> None:
-    """Store a JWT as if the user logged in, and print a personal token."""
-    config.validate_config(only=["url", "db_path", "encryption_key"])
-    jwt = Path(jwt_file).read_text().strip()
-    profile = await _verified_profile(config, jwt)
-    async with Store(
-        config.db_path, config.encryption_key, config.session_max_age
-    ) as store:
-        user_id = await store.upsert_login(jwt, profile)
-        _, token = await store.create_token(user_id, name, parse_duration(ttl))
-    print(f"Personal token for {profile.get('name')} <{profile.get('email')}>:\n")
-    print(token)
-    print("\nAdd it to Claude Code with:\n")
-    print(
-        f"claude mcp add --transport http wikijs {config.mcp_url or '<public url>/mcp/'} \\\n"
-        f'  --header "Authorization: Bearer {token}"'
-    )
-
-
 async def _stdio(config: WikiJSConfig, jwt_file: str) -> None:
     """Run over stdio as one fixed user, for local development."""
     config.validate_config(only=["url"])
@@ -870,13 +852,6 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="Run the Streamable HTTP server (default)")
 
-    dev_token = sub.add_parser(
-        "dev-token", help="Store a Wiki.js JWT and print a personal token (development)"
-    )
-    dev_token.add_argument("--jwt-file", required=True, help="File with a Wiki.js JWT")
-    dev_token.add_argument("--name", default="dev-token", help="Token name")
-    dev_token.add_argument("--ttl", default="7d", help="Token lifetime, e.g. 7d")
-
     stdio = sub.add_parser("stdio", help="Run over stdio as one user (development)")
     stdio.add_argument(
         "--dev-jwt-file", required=True, help="File with the Wiki.js JWT to act as"
@@ -893,9 +868,7 @@ async def _async_main(argv: list[str] | None = None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     config = WikiJSConfig.load_config()
 
-    if args.command == "dev-token":
-        await _dev_token(config, args.jwt_file, args.name, args.ttl)
-    elif args.command == "stdio":
+    if args.command == "stdio":
         await _stdio(config, args.dev_jwt_file)
     else:
         await _serve(config)
