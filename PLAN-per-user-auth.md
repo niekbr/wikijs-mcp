@@ -450,7 +450,39 @@ tool, pad of zoekterm en ok/denied/expired/error. Log nooit tokens of pagina-inh
 
 ---
 
-## Fase 4: loginflow via Wiki.js en persoonlijk token
+## Fase 4: loginflow via Wiki.js en persoonlijk token ✅ afgerond (2026-10-15)
+
+Gebouwd in `wikijs_mcp/web.py` (`WebRoutes`) en getest via een nginx-proxy in de
+dev-compose (`deploy/dev/nginx.conf`, `http://127.0.0.1:3090`). De lokale loginflow is
+nagespeeld zoals de browser het doet. **Nog niet getest: de echte OIDC-login en een
+groep met een eigen login-redirect.** Dat kan alleen tegen productie of staging.
+
+Beslissingen en afwijkingen:
+- **Altijd via de IdP** (keuze gebruiker): de optionele shortcut met een bestaande
+  `jwt`-cookie is niet gebouwd. De callback accepteert bovendien alleen een JWT waarvan
+  `iat` na het begin van de login ligt (marge 60 s). Een oude wiki-cookie kan de IdP
+  dus niet omzeilen.
+- **De state staat in het pad**: `loginRedirect=/mcp/auth/callback/<state>`. Die
+  cookie wordt met de hand geschreven, zonder quotes. Starlette zette de waarde tussen
+  quotes, en Wiki.js accepteert alleen waarden die met `/` beginnen. De cookie is niet
+  `HttpOnly`, omdat het lokale loginformulier hem in JavaScript leest.
+- `strategy_key=local` stuurt naar het loginformulier `/login` (voor dev en tests);
+  elke andere waarde naar `/login/<strategy_key>`.
+- De web-sessie duurt **1 uur** (keuze gebruiker). De pagina's zijn in het Engels
+  (keuze gebruiker).
+- **CSRF:** een synchronizer token per web-sessie, en daarnaast moet de `Origin`
+  (als die er is) gelijk zijn aan `public_url`. Een POST zonder geldige sessie of CSRF
+  stuurt door naar de login.
+- **Headers:** `Cache-Control: no-store`, een strikte CSP, `frame-ancestors 'none'`,
+  `X-Frame-Options: DENY` en `Referrer-Policy: no-referrer`. Het token staat alleen in
+  het antwoord op de POST.
+- **Geldigheid tokens:** te kiezen uit 7/30/90/180/365 dagen, begrensd door
+  `pat_max_ttl`, met `pat_default_ttl` als standaard.
+- **Op de tokenpagina staat:**
+  - tot wanneer de tokens werken (`login_at + session_max_age`)
+  - wanneer de JWT vervalt als hij niet gebruikt wordt
+  - dat uitloggen bij de wiki de tokens niet intrekt
+
 
 Nieuw: `wikijs_mcp/web.py`, met routes onder `mcp_base_path`.
 

@@ -4,7 +4,8 @@
 #   docker compose -f deploy/dev/docker-compose.yml up -d
 #   .venv/bin/python scripts/spike_setup.py
 #
-# Wiki.js draait daarna op http://127.0.0.1:3080
+# Wiki.js draait daarna op http://127.0.0.1:3080, en samen met de MCP-server
+# (wikijs-mcp serve op 127.0.0.1:8765) op één origin via http://127.0.0.1:3090
 
 name: wikijs-mcp-dev
 
@@ -32,6 +33,13 @@ services:
       DB_NAME: wiki
     ports:
       - "127.0.0.1:3080:3000"
+    restart: unless-stopped
+
+  proxy:
+    image: nginx:1.27-alpine
+    network_mode: host
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
 
 volumes:

@@ -36,6 +36,7 @@ from .errors import (
     WikiNotFound,
 )
 from .store import Store
+from .web import WebRoutes
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("wikijs_mcp.audit")
@@ -771,6 +772,7 @@ async def _serve(config: WikiJSConfig) -> None:
             user_source=token_user_source(store),
             token_verifier=StoreTokenVerifier(store),
         )
+        WebRoutes(config, store).register(server.app)
 
         async def purge_regularly() -> None:
             while True:

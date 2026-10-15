@@ -94,6 +94,8 @@ class WebSession:
     name: str
     csrf_secret: str
     expires_at: int
+    login_at: int
+    jwt_exp: int
 
 
 class Store:
@@ -372,7 +374,8 @@ class Store:
         now = self._now()
         async with self.db.execute(
             """
-            SELECT s.wiki_user_id, s.csrf_secret, s.expires_at, u.email, u.name
+            SELECT s.wiki_user_id, s.csrf_secret, s.expires_at, u.email, u.name,
+                   u.login_at, u.jwt_exp
             FROM web_sessions s JOIN users u USING (wiki_user_id)
             WHERE s.id_hash = ? AND s.expires_at > ? AND u.login_at > ?
             """,
