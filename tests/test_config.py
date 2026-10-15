@@ -5,7 +5,16 @@ from unittest.mock import patch
 
 import pytest
 
-from wikijs_mcp.config import WikiJSConfig
+from tests.conftest import TEST_FERNET_KEY
+from wikijs_mcp.config import WikiJSConfig, parse_duration
+
+VALID = {
+    "url": "http://wiki:3000",
+    "public_url": "https://wiki.example.com",
+    "strategy_key": "oidc",
+    "db_path": "/data/mcp.sqlite",
+    "encryption_key": TEST_FERNET_KEY,
+}
 
 
 @pytest.mark.unit
@@ -17,23 +26,45 @@ class TestWikiJSConfig:
         config = WikiJSConfig()
 
         assert config.url == ""
-        assert config.api_key == ""
         assert config.graphql_endpoint == "/graphql"
+        assert config.mcp_base_path == "/mcp"
+        assert config.token_renewal == 14 * 86400
+        assert config.session_max_age == 30 * 86400
+        assert config.pat_default_ttl == 90 * 86400
+        assert config.pat_max_ttl == 365 * 86400
+        assert config.html_timeout == 10.0
+        assert config.read_only is True
         assert config.debug is False
 
-    def test_init_with_values(self):
-        """Test WikiJSConfig initialization with specific values."""
-        config = WikiJSConfig(
-            url="https://test-wiki.com",
-            api_key="test-key-123",
-            graphql_endpoint="/api/graphql",
-            debug=True,
-        )
+    def test_no_api_key(self):
+        """The server never holds a Wiki.js API key."""
+        assert "api_key" not in WikiJSConfig.model_fields
+        assert not hasattr(WikiJSConfig(), "headers")
 
-        assert config.url == "https://test-wiki.com"
-        assert config.api_key == "test-key-123"
-        assert config.graphql_endpoint == "/api/graphql"
-        assert config.debug is True
+    def test_durations_accept_strings(self):
+        config = WikiJSConfig(token_renewal="2m", session_max_age="1h")
+
+        assert config.token_renewal == 120
+        assert config.session_max_age == 3600
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("30m", 1800),
+            ("14d", 1209600),
+            ("12h", 43200),
+            ("45s", 45),
+            ("90", 90),
+            (7, 7),
+        ],
+    )
+    def test_parse_duration(self, value, expected):
+        assert parse_duration(value) == expected
+
+    @pytest.mark.parametrize("value", ["", "14 days", "1w", "-5m", "m"])
+    def test_parse_duration_invalid(self, value):
+        with pytest.raises(ValueError, match="Invalid duration"):
+            parse_duration(value)
 
     def test_graphql_url_property(self):
         """Test graphql_url property construction."""
@@ -47,69 +78,104 @@ class TestWikiJSConfig:
 
         assert config.graphql_url == "https://test-wiki.com/graphql"
 
-    def test_headers_property(self):
-        """Test headers property construction."""
-        config = WikiJSConfig(api_key="test-api-key-123")
+    def test_page_source_url(self):
+        config = WikiJSConfig(url="http://wiki:3000/")
 
-        headers = config.headers
-
-        assert headers["Authorization"] == "Bearer test-api-key-123"
-        assert headers["Content-Type"] == "application/json"
+        assert (
+            config.page_source_url("/docs/a/", "nl") == "http://wiki:3000/s/nl/docs/a"
+        )
 
     def test_validate_config_success(self):
-        """Test successful config validation."""
-        config = WikiJSConfig(url="https://test-wiki.com", api_key="test-api-key")
+        """Test validation passes with all required fields."""
+        WikiJSConfig(**VALID).validate_config()
 
-        config.validate_config()
+    @pytest.mark.parametrize(
+        "field,env_name",
+        [
+            ("url", "WIKIJS_URL"),
+            ("public_url", "WIKIJS_PUBLIC_URL"),
+            ("strategy_key", "WIKIJS_STRATEGY_KEY"),
+            ("db_path", "WIKIJS_MCP_DB_PATH"),
+            ("encryption_key", "WIKIJS_MCP_ENCRYPTION_KEY"),
+        ],
+    )
+    def test_validate_config_missing_field(self, field, env_name):
+        config = WikiJSConfig(**{**VALID, field: ""})
 
-    def test_validate_config_missing_url(self):
-        """Test config validation with missing URL."""
-        config = WikiJSConfig(api_key="test-api-key")
-
-        with pytest.raises(ValueError, match="WIKIJS_URL"):
+        with pytest.raises(ValueError, match=env_name):
             config.validate_config()
 
-    def test_validate_config_missing_api_key(self):
-        """Test config validation with missing API key."""
-        config = WikiJSConfig(url="https://test-wiki.com")
+    def test_validate_config_lists_all_missing(self):
+        with pytest.raises(ValueError, match="WIKIJS_URL.*WIKIJS_PUBLIC_URL"):
+            WikiJSConfig().validate_config()
 
-        with pytest.raises(ValueError, match="WIKIJS_API_KEY"):
+    def test_validate_config_invalid_fernet_key(self):
+        config = WikiJSConfig(**{**VALID, "encryption_key": "not-a-key"})
+
+        with pytest.raises(ValueError, match="not a valid Fernet key"):
             config.validate_config()
 
-    def test_validate_config_missing_both(self):
-        """Test config validation with missing URL and API key."""
-        config = WikiJSConfig()
+    def test_validate_config_base_path_must_be_absolute(self):
+        config = WikiJSConfig(**{**VALID, "mcp_base_path": "mcp"})
 
-        with pytest.raises(ValueError, match="WIKIJS_URL"):
+        with pytest.raises(ValueError, match="WIKIJS_MCP_BASE_PATH"):
+            config.validate_config()
+
+    def test_validate_config_pat_ttls(self):
+        config = WikiJSConfig(**{**VALID, "pat_default_ttl": "400d"})
+
+        with pytest.raises(ValueError, match="PAT_DEFAULT_TTL"):
             config.validate_config()
 
     def test_load_config_from_env_vars(self):
         """Test loading config from environment variables."""
         env_vars = {
-            "WIKIJS_URL": "https://test-wiki.com",
-            "WIKIJS_API_KEY": "test-key-123",
+            "WIKIJS_URL": "http://wiki:3000",
             "WIKIJS_GRAPHQL_ENDPOINT": "/api/graphql",
+            "WIKIJS_PUBLIC_URL": "https://wiki.example.com",
+            "WIKIJS_MCP_BASE_PATH": "/wiki-mcp",
+            "WIKIJS_STRATEGY_KEY": "abc-123",
+            "WIKIJS_MCP_DB_PATH": "/data/mcp.sqlite",
+            "WIKIJS_MCP_ENCRYPTION_KEY": TEST_FERNET_KEY,
+            "WIKIJS_DEFAULT_LOCALE": "nl",
+            "WIKIJS_TOKEN_RENEWAL": "7d",
+            "WIKIJS_MCP_SESSION_MAX_AGE": "10d",
+            "WIKIJS_MCP_PAT_DEFAULT_TTL": "30d",
+            "WIKIJS_MCP_PAT_MAX_TTL": "60d",
+            "WIKIJS_HTML_TIMEOUT": "5",
+            "WIKIJS_MCP_READ_ONLY": "false",
             "DEBUG": "true",
         }
 
         with patch.dict(os.environ, env_vars):
             config = WikiJSConfig.load_config()
 
-        assert config.url == "https://test-wiki.com"
-        assert config.api_key == "test-key-123"
+        assert config.url == "http://wiki:3000"
         assert config.graphql_endpoint == "/api/graphql"
+        assert config.public_url == "https://wiki.example.com"
+        assert config.mcp_base_path == "/wiki-mcp"
+        assert config.strategy_key == "abc-123"
+        assert config.db_path == "/data/mcp.sqlite"
+        assert config.encryption_key == TEST_FERNET_KEY
+        assert config.default_locale == "nl"
+        assert config.token_renewal == 7 * 86400
+        assert config.session_max_age == 10 * 86400
+        assert config.pat_default_ttl == 30 * 86400
+        assert config.pat_max_ttl == 60 * 86400
+        assert config.html_timeout == 5.0
+        assert config.read_only is False
         assert config.debug is True
+        config.validate_config()
 
     def test_load_config_with_defaults(self):
         """Test that load_config uses defaults for missing env vars."""
-        env_vars = {"WIKIJS_URL": "https://test.com", "WIKIJS_API_KEY": "test-key"}
-
-        with patch.dict(os.environ, env_vars):
+        with patch.dict(os.environ, {"WIKIJS_URL": "https://test.com"}):
             config = WikiJSConfig.load_config()
 
         assert config.url == "https://test.com"
-        assert config.api_key == "test-key"
         assert config.graphql_endpoint == "/graphql"
+        assert config.token_renewal == 14 * 86400
+        assert config.read_only is True
         assert config.debug is False
 
     @pytest.mark.parametrize(
@@ -127,11 +193,7 @@ class TestWikiJSConfig:
     )
     def test_debug_flag_parsing(self, debug_value, expected):
         """Test debug flag parsing from environment."""
-        env_vars = {
-            "WIKIJS_URL": "https://test.com",
-            "WIKIJS_API_KEY": "test-key",
-            "DEBUG": debug_value,
-        }
+        env_vars = {"WIKIJS_URL": "https://test.com", "DEBUG": debug_value}
 
         with patch.dict(os.environ, env_vars):
             config = WikiJSConfig.load_config()

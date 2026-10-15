@@ -120,7 +120,26 @@ De dev-omgeving blijft bruikbaar voor de tests van de volgende fases en voor fas
 
 ---
 
-## Fase 1: client en configuratie per gebruiker
+## Fase 1: client en configuratie per gebruiker ✅ afgerond (2026-10-15)
+
+Gebouwd zoals hieronder beschreven, met deze afwijkingen en aanvullingen:
+- `resolve_page_id` en `get_page_meta` gebruiken alleen `pages.list` (één aanroep
+  per client, gecachet), en niet `/s/`. Dat scheelt een HTML-verzoek per id.
+- `update_page` haalt CSS/JS en het publicatievenster eerst op via `singleByPath`.
+  Dat lukt voor gebruikers met `manage:pages` op dat pad (zoals beheerders van een
+  onderdeel), en dan blijft alles behouden. Lukt het niet, dan bepalen de
+  effectieve rechten **voor die pagina** (`pages.style`/`pages.script` uit `/s/`) of
+  de update geweigerd wordt, niet de globale rechten uit de JWT.
+- Code 1019 ("authentication required") wordt `WikiAuthRevoked`. De client stuurt
+  nooit een JWT die al voorbij de vernieuwingstermijn is, dus 1019 betekent dat
+  Wiki.js een token weigert die nog geldig had moeten zijn.
+- `search_pages(locale=None)` zoekt in alle locales.
+- `get_page_by_path`, `get_page_by_id` en `get_site_info` zijn verwijderd. De server
+  roept ze nog aan tot fase 3; tot die tijd is de stdio-server niet bruikbaar (de
+  servertests mocken de client en slagen wel).
+- `poetry.lock` is niet bijgewerkt voor de nieuwe dependency `cryptography`: poetry is
+  hier niet geïnstalleerd. Draai `poetry lock` voordat je commit.
+
 
 **`config.py`**
 - `WikiJSConfig` krijgt alleen nog site-instellingen:

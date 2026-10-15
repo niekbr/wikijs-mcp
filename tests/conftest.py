@@ -7,14 +7,20 @@ import pytest
 
 from wikijs_mcp.config import WikiJSConfig
 
+TEST_FERNET_KEY = "2bXUiI7DYAoTrVPRrtK0O1D9PZzKRzMG4wNDFr7Aw8E="
+
 
 @pytest.fixture
 def mock_wiki_config():
     """Mock WikiJS configuration."""
     return WikiJSConfig(
         url="https://test-wiki.example.com",
-        api_key="test-api-key-123",
         graphql_endpoint="/graphql",
+        public_url="https://wiki.example.com",
+        strategy_key="oidc",
+        db_path=":memory:",
+        encryption_key=TEST_FERNET_KEY,
+        default_locale="en",
         debug=True,
     )
 
@@ -150,7 +156,23 @@ def sample_site_config():
 @pytest.fixture(autouse=True)
 def clean_env():
     """Clean environment variables before each test."""
-    env_vars = ["WIKIJS_URL", "WIKIJS_API_KEY", "WIKIJS_GRAPHQL_ENDPOINT", "DEBUG"]
+    env_vars = [
+        "WIKIJS_URL",
+        "WIKIJS_GRAPHQL_ENDPOINT",
+        "WIKIJS_PUBLIC_URL",
+        "WIKIJS_MCP_BASE_PATH",
+        "WIKIJS_STRATEGY_KEY",
+        "WIKIJS_MCP_DB_PATH",
+        "WIKIJS_MCP_ENCRYPTION_KEY",
+        "WIKIJS_DEFAULT_LOCALE",
+        "WIKIJS_TOKEN_RENEWAL",
+        "WIKIJS_MCP_SESSION_MAX_AGE",
+        "WIKIJS_MCP_PAT_DEFAULT_TTL",
+        "WIKIJS_MCP_PAT_MAX_TTL",
+        "WIKIJS_HTML_TIMEOUT",
+        "WIKIJS_MCP_READ_ONLY",
+        "DEBUG",
+    ]
 
     original_values = {}
     for var in env_vars:

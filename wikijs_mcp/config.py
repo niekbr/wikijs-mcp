@@ -1,44 +1,121 @@
 """Configuration management for WikiJS MCP Server."""
 
 import os
+import re
 
-from pydantic import BaseModel, Field
+from cryptography.fernet import Fernet
+from pydantic import BaseModel, Field, field_validator
+
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(value: str | int) -> int:
+    """Parse a duration like '30m', '14d' or a number of seconds into seconds."""
+    if isinstance(value, int):
+        return value
+    match = re.fullmatch(r"\s*(\d+)\s*([smhd]?)\s*", str(value))
+    if not match:
+        raise ValueError(f"Invalid duration: {value!r} (use e.g. '30m', '14d')")
+    amount, unit = match.groups()
+    return int(amount) * _DURATION_UNITS[unit or "s"]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() == "true"
 
 
 class WikiJSConfig(BaseModel):
-    """Configuration for Wiki.js connection."""
+    """Site-wide settings. Credentials are per user and never part of the config."""
 
     url: str = Field(default="")
-    api_key: str = Field(default="")
     graphql_endpoint: str = Field(default="/graphql")
+    public_url: str = Field(default="")
+    mcp_base_path: str = Field(default="/mcp")
+    strategy_key: str = Field(default="")
+    db_path: str = Field(default="")
+    encryption_key: str = Field(default="")
+    default_locale: str = Field(default="")
+    token_renewal: int = Field(default=parse_duration("14d"))
+    session_max_age: int = Field(default=parse_duration("30d"))
+    pat_default_ttl: int = Field(default=parse_duration("90d"))
+    pat_max_ttl: int = Field(default=parse_duration("365d"))
+    html_timeout: float = Field(default=10.0)
+    read_only: bool = Field(default=True)
     debug: bool = Field(default=False)
+
+    @field_validator(
+        "token_renewal",
+        "session_max_age",
+        "pat_default_ttl",
+        "pat_max_ttl",
+        mode="before",
+    )
+    @classmethod
+    def _parse_duration(cls, value):
+        return parse_duration(value)
 
     @classmethod
     def load_config(cls) -> "WikiJSConfig":
         """Load configuration from environment variables."""
-        return cls(
-            url=os.getenv("WIKIJS_URL", ""),
-            api_key=os.getenv("WIKIJS_API_KEY", ""),
-            graphql_endpoint=os.getenv("WIKIJS_GRAPHQL_ENDPOINT", "/graphql"),
-            debug=os.getenv("DEBUG", "false").lower() == "true",
-        )
+        values = {
+            "url": os.getenv("WIKIJS_URL", ""),
+            "graphql_endpoint": os.getenv("WIKIJS_GRAPHQL_ENDPOINT", "/graphql"),
+            "public_url": os.getenv("WIKIJS_PUBLIC_URL", ""),
+            "mcp_base_path": os.getenv("WIKIJS_MCP_BASE_PATH", "/mcp"),
+            "strategy_key": os.getenv("WIKIJS_STRATEGY_KEY", ""),
+            "db_path": os.getenv("WIKIJS_MCP_DB_PATH", ""),
+            "encryption_key": os.getenv("WIKIJS_MCP_ENCRYPTION_KEY", ""),
+            "default_locale": os.getenv("WIKIJS_DEFAULT_LOCALE", ""),
+            "read_only": _env_bool("WIKIJS_MCP_READ_ONLY", True),
+            "debug": _env_bool("DEBUG", False),
+        }
+        optional = {
+            "token_renewal": "WIKIJS_TOKEN_RENEWAL",
+            "session_max_age": "WIKIJS_MCP_SESSION_MAX_AGE",
+            "pat_default_ttl": "WIKIJS_MCP_PAT_DEFAULT_TTL",
+            "pat_max_ttl": "WIKIJS_MCP_PAT_MAX_TTL",
+            "html_timeout": "WIKIJS_HTML_TIMEOUT",
+        }
+        for field, env_name in optional.items():
+            if os.getenv(env_name):
+                values[field] = os.environ[env_name]
+        return cls(**values)
 
     @property
     def graphql_url(self) -> str:
         """Get the full GraphQL endpoint URL."""
         return f"{self.url.rstrip('/')}{self.graphql_endpoint}"
 
-    @property
-    def headers(self) -> dict[str, str]:
-        """Get authentication headers for API requests."""
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+    def page_source_url(self, path: str, locale: str) -> str:
+        """URL of the Wiki.js source view of a page."""
+        return f"{self.url.rstrip('/')}/s/{locale}/{path.strip('/')}"
 
     def validate_config(self) -> None:
         """Validate that required configuration is present."""
-        if not self.url:
-            raise ValueError("WIKIJS_URL environment variable must be set.")
-        if not self.api_key:
-            raise ValueError("WIKIJS_API_KEY environment variable must be set.")
+        required = {
+            "url": "WIKIJS_URL",
+            "public_url": "WIKIJS_PUBLIC_URL",
+            "strategy_key": "WIKIJS_STRATEGY_KEY",
+            "db_path": "WIKIJS_MCP_DB_PATH",
+            "encryption_key": "WIKIJS_MCP_ENCRYPTION_KEY",
+        }
+        missing = [env for field, env in required.items() if not getattr(self, field)]
+        if missing:
+            raise ValueError(
+                f"Missing required environment variable(s): {', '.join(missing)}"
+            )
+        try:
+            Fernet(self.encryption_key)
+        except ValueError as e:
+            raise ValueError(
+                "WIKIJS_MCP_ENCRYPTION_KEY is not a valid Fernet key"
+            ) from e
+        if not self.mcp_base_path.startswith("/"):
+            raise ValueError("WIKIJS_MCP_BASE_PATH must start with '/'")
+        if self.pat_default_ttl > self.pat_max_ttl:
+            raise ValueError(
+                "WIKIJS_MCP_PAT_DEFAULT_TTL cannot exceed WIKIJS_MCP_PAT_MAX_TTL"
+            )
