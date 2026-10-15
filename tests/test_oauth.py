@@ -313,6 +313,74 @@ class TestAuthorizationFlow:
         assert response.status_code == 303
         assert "/mcp/login" in response.headers["location"]
 
+    @pytest.mark.parametrize(
+        "fetch_metadata",
+        [
+            # fetch() from a script in a wiki page
+            {"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"},
+            # form.submit() without a click
+            {
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+            },
+            # a form posted into a hidden iframe
+            {
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "iframe",
+                "Sec-Fetch-User": "?1",
+            },
+            # from another site
+            {
+                "Sec-Fetch-Site": "cross-site",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-User": "?1",
+            },
+        ],
+    )
+    async def test_consent_needs_a_click(self, http, store, fetch_metadata):
+        """A script on the wiki's origin can read the CSRF token, but cannot fake
+        a user's click; the request stays pending for the real user."""
+        client_id = await register(http)
+        consent_path = await authorize(http, client_id, pkce()[1])
+        await sign_in(http, store)
+        page = await http.get(consent_path)
+        csrf = re.search(r"name='csrf' value='([^']+)'", page.text).group(1)
+
+        response = await http.post(
+            consent_path,
+            data={"csrf": csrf, "decision": "allow"},
+            headers={"Origin": BASE, **fetch_metadata},
+        )
+
+        assert response.status_code == 403
+        assert "location" not in response.headers
+        assert (await http.get(consent_path)).status_code == 200
+
+    async def test_consent_by_click(self, http, store):
+        client_id = await register(http)
+        consent_path = await authorize(http, client_id, pkce()[1])
+        await sign_in(http, store)
+        page = await http.get(consent_path)
+        csrf = re.search(r"name='csrf' value='([^']+)'", page.text).group(1)
+
+        response = await http.post(
+            consent_path,
+            data={"csrf": csrf, "decision": "allow"},
+            headers={
+                "Origin": BASE,
+                "Sec-Fetch-Site": "same-origin",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-User": "?1",
+            },
+        )
+
+        assert response.status_code == 303
+        assert "code=" in response.headers["location"]
+
     async def test_pending_request_expires(self, http, store, clock):
         client_id = await register(http)
         consent_path = await authorize(http, client_id, pkce()[1])

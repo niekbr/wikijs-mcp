@@ -200,6 +200,26 @@ class WebRoutes:
             return None, None
         return session, form
 
+    @staticmethod
+    def _clicked_by_user(request: Request) -> bool:
+        """Whether a form post comes from the user clicking a button.
+
+        The MCP server shares its origin with the wiki, so a script in a wiki page
+        (XSS) could read the CSRF token and post the consent form itself. Browsers
+        with Fetch Metadata mark a post from a click as a top-level navigation with
+        user activation; fetch(), a form in an iframe or form.submit() without a
+        click are not. Browsers without these headers rely on the CSRF token alone.
+        """
+        headers = request.headers
+        if "sec-fetch-site" not in headers:
+            return True
+        return (
+            headers.get("sec-fetch-site") == "same-origin"
+            and headers.get("sec-fetch-mode") == "navigate"
+            and headers.get("sec-fetch-dest", "document") == "document"
+            and headers.get("sec-fetch-user") == "?1"
+        )
+
     def _redirect_to_login(self) -> RedirectResponse:
         return RedirectResponse(
             f"{self.base}/login?next={self.base}/apps", status_code=303
@@ -432,6 +452,11 @@ class WebRoutes:
 
     async def decide(self, request: Request) -> Response:
         pending_id = request.path_params["pending_id"]
+        if not self._clicked_by_user(request):
+            logger.warning("Consent post without a user click refused")
+            return self._error(
+                "Allowing an app needs a click on the consent page.", status_code=403
+            )
         session, form = await self._form_session(request)
         if session is None:
             return self._redirect_to_login()
