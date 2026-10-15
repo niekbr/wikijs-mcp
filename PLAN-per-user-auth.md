@@ -267,7 +267,27 @@ en de nieuwe tests slagen.
 
 ---
 
-## Fase 2: opslag van gebruikers en tokens
+## Fase 2: opslag van gebruikers en tokens ✅ afgerond (2026-10-15)
+
+Gebouwd in `wikijs_mcp/store.py` (`Store`), met deze afwijkingen en aanvullingen:
+- `mcp_tokens` heeft een eigen `id` (PK). `token_hash` is UNIQUE. Daarmee kunnen de
+  beheerpagina's een token intrekken zonder de hash te tonen.
+  `revoke_token(user_id, token_id)` werkt alleen op tokens van de gebruiker zelf.
+- De OAuth-tabellen komen pas in fase 5. Het schema heeft een versie
+  (`PRAGMA user_version`), en een nieuwere database wordt geweigerd.
+- `purge_expired()`:
+  - wist bij een login ouder dan `session_max_age` **alleen de JWT**; tokens werken
+    weer na opnieuw inloggen
+  - verwijdert een gebruiker pas als die ook geen bruikbare tokens meer heeft
+  - bewaart ingetrokken en verlopen tokens nog 30 dagen voor de audit
+- Kan de JWT niet ontsleuteld worden (andere Fernet-sleutel) of is hij gewist, dan
+  is `TokenUser.jwt` `None`. De server behandelt dat als "log opnieuw in".
+- `update_jwt` verlengt `login_at` niet. Alleen een echte SSO-login reset de absolute
+  termijn.
+- Ook web-sessies (`create/get/delete_web_session`, met CSRF-secret) en login-states
+  (`create_login_state`, `consume_login_state`) zijn klaar. Een login-state is één
+  keer bruikbaar, gebonden aan de browser, en 10 minuten geldig.
+
 
 Nieuw: `wikijs_mcp/store.py`
 
