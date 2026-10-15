@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "wikijs": {
-      "command": "pipx",
-      "args": ["run", "wikijs-mcp"]
+    "wikijs-oauth-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:3090/mcp/"
     }
   }
 }

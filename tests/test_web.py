@@ -233,7 +233,8 @@ class TestTokenPage:
         assert "<option value='90' selected>" in response.text
         assert "does not revoke these tokens" in response.text
         assert response.headers["x-frame-options"] == "DENY"
-        assert response.headers["referrer-policy"] == "no-referrer"
+        # no-referrer would make browsers send `Origin: null` on form posts
+        assert response.headers["referrer-policy"] == "same-origin"
         assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
     async def test_ttl_choices_respect_maximum(self, mock_wiki_config, store):
@@ -298,6 +299,31 @@ class TestTokenPage:
         )
 
         assert response.status_code == 400
+        assert await store.list_tokens(3) == []
+
+    async def test_browser_form_post_with_origin(self, http, store):
+        """Browsers send the page's origin on form posts; that must be accepted."""
+        csrf = await signed_in(http, store)
+
+        response = await http.post(
+            "/mcp/token",
+            data={"csrf": csrf, "name": "laptop", "ttl_days": "30"},
+            headers={"Origin": "https://wiki.example.com"},
+        )
+
+        assert response.status_code == 200
+        assert len(await store.list_tokens(3)) == 1
+
+    async def test_null_origin_rejected(self, http, store):
+        csrf = await signed_in(http, store)
+
+        response = await http.post(
+            "/mcp/token",
+            data={"csrf": csrf, "name": "laptop", "ttl_days": "30"},
+            headers={"Origin": "null"},
+        )
+
+        assert response.status_code == 303
         assert await store.list_tokens(3) == []
 
     async def test_revoke(self, http, store):

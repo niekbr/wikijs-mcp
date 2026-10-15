@@ -105,7 +105,12 @@ async def authorize(http, client_id, challenge, state="xyz"):
 async def consent(http, consent_path, decision="allow"):
     page = await http.get(consent_path)
     csrf = re.search(r"name='csrf' value='([^']+)'", page.text).group(1)
-    response = await http.post(consent_path, data={"csrf": csrf, "decision": decision})
+    # As a browser does it: with the page's Origin
+    response = await http.post(
+        consent_path,
+        data={"csrf": csrf, "decision": decision},
+        headers={"Origin": BASE},
+    )
     return response, parse_qs(urlsplit(response.headers.get("location", "")).query)
 
 
@@ -233,6 +238,11 @@ class TestAuthorizationFlow:
         assert "https://claude.ai" in page.text
         assert "read every wiki page you can read" in page.text
         assert page.headers["x-frame-options"] == "DENY"
+        # Browsers apply form-action to the redirect after Allow/Deny
+        assert (
+            "form-action 'self' https://claude.ai;"
+            in (page.headers["content-security-policy"])
+        )
 
     async def test_full_flow_issues_working_tokens(self, http, store):
         client_id, tokens = await full_flow(http, store)

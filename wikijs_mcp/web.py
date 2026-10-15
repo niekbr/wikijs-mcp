@@ -47,7 +47,9 @@ SECURITY_HEADERS = {
         "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
         "frame-ancestors 'none'; base-uri 'none'"
     ),
-    "Referrer-Policy": "no-referrer",
+    # Not no-referrer: then browsers send `Origin: null` on form posts, which the
+    # Origin check rejects. same-origin still sends nothing to other sites.
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
 }
@@ -75,14 +77,26 @@ def _fmt(timestamp: int | None) -> str:
     )
 
 
-def _page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
+def _page(
+    title: str,
+    body: str,
+    status_code: int = 200,
+    form_targets: tuple[str, ...] = (),
+) -> HTMLResponse:
+    """An HTML page. `form_targets` are extra origins a form may end up at:
+    browsers apply the CSP form-action also to the redirect after a post."""
     document = (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>{html.escape(title)}</title><style>{STYLE}</style></head>"
         f"<body><h1>{html.escape(title)}</h1>{body}</body></html>"
     )
-    return HTMLResponse(document, status_code=status_code, headers=SECURITY_HEADERS)
+    headers = dict(SECURITY_HEADERS)
+    if form_targets:
+        headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace(
+            "form-action 'self'", "form-action 'self' " + " ".join(form_targets)
+        )
+    return HTMLResponse(document, status_code=status_code, headers=headers)
 
 
 class WebRoutes:
@@ -481,7 +495,12 @@ class WebRoutes:
             "<button type='submit' name='decision' value='allow'>Allow</button> "
             "<button type='submit' name='decision' value='deny'>Deny</button></form>"
         )
-        return _page("Connect an app to the wiki", body)
+        # Allow/Deny redirect to the app; the CSP must allow that destination
+        return _page(
+            "Connect an app to the wiki",
+            body,
+            form_targets=(f"{redirect.scheme}://{redirect.netloc}",),
+        )
 
     async def decide(self, request: Request) -> Response:
         pending_id = request.path_params["pending_id"]
