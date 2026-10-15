@@ -194,6 +194,7 @@ once.
   `401`. The app then runs the sign-in again by itself. In Claude Code: `/mcp` →
   re-authenticate.
 - **Tokens:** OAuth access tokens last 1 hour, and refresh tokens rotate on every use.
+  A refresh token used twice disconnects that app: it may have been stolen.
 - **Logging out of the wiki** does not disconnect apps. Disconnect them on `/mcp/apps`.
 
 ## Security notes
@@ -201,11 +202,16 @@ once.
 - **Encryption:** stored Wiki.js sessions are encrypted with `WIKIJS_MCP_ENCRYPTION_KEY`.
   This mainly protects a **leaked copy of the database** (e.g. a backup). Someone with
   access to the running container also has the key.
+- **What the server holds:** a Wiki.js session of every connected user, with all of
+  that user's rights, administrators included. Protect the container as well as the
+  wiki itself.
 - **Hashing:** access tokens, refresh tokens, authorization codes and web session ids are
   stored only as SHA-256 hashes.
 - **Logs:** they never contain tokens, Wiki.js sessions or page content. Each tool
   call writes one audit line to the `wikijs_mcp.audit` logger (user, tool, path or
-  search term, outcome).
+  search term, outcome). These lines hold e-mail addresses and search terms, so they
+  are personal data: limit how long the journal keeps them (e.g. `MaxRetentionSec=`
+  in `journald.conf`).
 - **Sign-in:**
   - The login state is single-use and bound to the browser.
   - Only a Wiki.js session issued during that very sign-in is accepted, so an old wiki
@@ -215,8 +221,25 @@ once.
   Content Security Policy and `Cache-Control: no-store`.
 - **OAuth:**
   - Registration is open (as MCP clients expect).
-  - Redirect URIs must be `https`, or `http` on a loopback address.
-  - Every authorization needs the user's explicit consent.
+  - Redirect URIs must be `https`, or `http` on a loopback address, without user info
+    (`https://claude.ai@evil.example/` is refused).
+  - Every authorization needs the user's explicit consent. The consent page shows the
+    real host the app redirects to, and the app's name as the app chose it: anyone can
+    register an app called "Claude".
+  - Allowing an app needs a click: browsers that send Fetch Metadata headers (all current
+    major browsers) refuse a consent posted by a script.
+- **Same origin as the wiki:** the MCP pages must share the wiki's host name, because
+  sign-in takes over the Wiki.js login cookie. A script injected into a wiki page (XSS)
+  could therefore act on these pages too. Keep Wiki.js's HTML sanitization on
+  (Administration → Rendering → HTML → Security), and be careful with who may add
+  scripts to pages.
+- **Write tools and prompt injection:** page content goes to the AI model as it is. A
+  page can contain instructions aimed at the model, e.g. to change or delete other
+  pages. With `WIKIJS_MCP_READ_ONLY=true` (the default) the tools cannot change
+  anything; enable write tools only if you accept that risk, and let users review the
+  changes their app proposes.
+- **Page paths:** paths and locales from tool calls cannot leave the source view
+  (`..` is refused), so a user's session is only sent to the URLs the tools need.
 - **Leaks in Wiki.js:**
   - Wiki.js does not filter search totals and suggestions by permission. The server
     never requests them.
