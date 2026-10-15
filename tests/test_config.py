@@ -86,6 +86,35 @@ class TestWikiJSConfig:
             config.page_source_url("/docs/a/", "nl") == "http://wiki:3000/s/nl/docs/a"
         )
 
+    def test_page_source_url_encodes_segments(self):
+        config = WikiJSConfig(url="http://wiki:3000")
+
+        assert (
+            config.page_source_url("docs/a b?x=1#y/%2e%2e", "pt-br")
+            == "http://wiki:3000/s/pt-br/docs/a%20b%3Fx=1%23y/%252e%252e"
+        )
+
+    @pytest.mark.parametrize(
+        "path,locale",
+        [
+            ("../../graphql", "en"),
+            ("docs/../../login", "en"),
+            ("docs/./a", "en"),
+            ("docs//a", "en"),
+            ("", "en"),
+            ("docs/a\nb", "en"),
+            ("docs/a", "../.."),
+            ("docs/a", "en/../admin"),
+            ("docs/a", "en?x"),
+        ],
+    )
+    def test_page_source_url_refuses_escapes(self, path, locale):
+        """Dot segments would reach any Wiki.js URL with the user's token."""
+        config = WikiJSConfig(url="http://wiki:3000")
+
+        with pytest.raises(ValueError):
+            config.page_source_url(path, locale)
+
     def test_validate_config_success(self):
         """Test validation passes with all required fields."""
         WikiJSConfig(**VALID).validate_config()

@@ -2,11 +2,14 @@
 
 import os
 import re
+from urllib.parse import quote
 
 from cryptography.fernet import Fernet
 from pydantic import BaseModel, Field, field_validator
 
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# Wiki.js locale codes: en, nl, pt-br, zh-hans, ...
+_LOCALE_RE = re.compile(r"[a-z]{2,3}(-[a-z0-9]{2,8})?", re.I)
 
 
 def parse_duration(value: str | int) -> int:
@@ -90,8 +93,23 @@ class WikiJSConfig(BaseModel):
         return f"{self.url.rstrip('/')}{self.graphql_endpoint}"
 
     def page_source_url(self, path: str, locale: str) -> str:
-        """URL of the Wiki.js source view of a page."""
-        return f"{self.url.rstrip('/')}/s/{locale}/{path.strip('/')}"
+        """URL of the Wiki.js source view of a page.
+
+        Path and locale come from tool arguments: dot segments would let them reach
+        any URL of Wiki.js (with the user's token), so they are refused, and every
+        segment is percent-encoded.
+        """
+        if not _LOCALE_RE.fullmatch(locale):
+            raise ValueError(f"Invalid locale: {locale!r}")
+        segments = path.strip("/").split("/")
+        if any(
+            segment in ("", ".", "..") or any(ord(ch) < 32 for ch in segment)
+            for segment in segments
+        ):
+            raise ValueError(f"Invalid page path: {path!r}")
+        # Sub-delims stay as they are; ? # % and the like are encoded
+        encoded = "/".join(quote(segment, safe="!$&'()*+,;=:@") for segment in segments)
+        return f"{self.url.rstrip('/')}/s/{locale}/{encoded}"
 
     @property
     def mcp_url(self) -> str:

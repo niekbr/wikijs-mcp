@@ -290,6 +290,19 @@ class TestPageSource:
 
         assert client.client.get.call_args.args[0].endswith("/s/en/test/speciaal")
 
+    @pytest.mark.parametrize(
+        "path,locale", [("x/../../../login", "en"), ("docs/a", "../..")]
+    )
+    async def test_refuses_paths_outside_source_view(self, make_client, path, locale):
+        """The user's token must not be sent to other Wiki.js URLs."""
+        client = make_client()
+        client.client.get = AsyncMock()
+
+        with pytest.raises(ValueError):
+            await client.get_page_source(path, locale)
+
+        client.client.get.assert_not_called()
+
     async def test_renewed_jwt_from_cookie(self, make_client):
         new = make_jwt()
         on_new_jwt = AsyncMock()
