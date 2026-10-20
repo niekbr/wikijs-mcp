@@ -1,73 +1,292 @@
 # WikiJS MCP Server
 
-An MCP server that connects Claude to your [Wiki.js](https://js.wiki/) instance. Search, read, create, update, move, and delete wiki pages through natural language.
+An MCP server that connects Claude to your [Wiki.js](https://js.wiki/) 2.5 instance,
+**as each signed-in wiki user**. Search, read and (optionally) edit wiki pages through
+natural language, with exactly the rights that user has in Wiki.js.
 
-## Prerequisites
+> This is a fork of [jaalbin24/wikijs-mcp](https://github.com/jaalbin24/wikijs-mcp).
+> The original runs locally with one Wiki.js API key that has full access. This fork
+> is a centrally hosted server without an API key: every user signs in through the
+> wiki's own login (e.g. SSO), and every request runs with that user's own Wiki.js
+> session.
 
-- Python 3.10+
-- A Wiki.js instance with API access enabled
-- A Wiki.js API key (Administration > API Access > New API Key)
+## How it works
 
-## Installation
-
-### Claude Code
-
-```bash
-claude mcp add wikijs \
-  --scope user \
-  -e WIKIJS_URL=https://your-wiki.com \
-  -e WIKIJS_API_KEY=your-api-key \
-  -- pipx run wikijs-mcp
+```
+Claude ──OAuth token──▶ nginx ──/mcp/──▶ wikijs-mcp ──user's Wiki.js JWT──▶ Wiki.js
+                          │                    ▲
+                          └──── everything else ──────────────────────────▶ Wiki.js
 ```
 
-Verify with `claude mcp list`.
-
-### Other MCP clients
-
-Add to your MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "wikijs": {
-      "command": "pipx",
-      "args": ["run", "wikijs-mcp"],
-      "env": {
-        "WIKIJS_URL": "https://your-wiki.com",
-        "WIKIJS_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-You can substitute `pipx run wikijs-mcp` with `uvx wikijs-mcp` or install globally with `pip install wikijs-mcp` and use `wikijs-mcp` as the command.
+- The MCP server lives under `/mcp/` on the **same host name as the wiki**. That is
+  required: after a user signs in through Wiki.js, the server takes over Wiki.js's
+  login cookie.
+- **Connecting a client:** clients connect through OAuth: Claude Code, claude.ai and
+  Claude Desktop. When a user adds the server, the client opens the normal Wiki.js
+  login (and so your identity provider), and then a consent screen. The server
+  stores the resulting Wiki.js session, encrypted. There are no personal tokens to
+  copy around.
+- **Rights:** Wiki.js decides everything — groups, page rules, deactivated accounts.
+  The server has no API key and no permission logic of its own. A page you may not
+  see behaves as if it does not exist.
 
 ## Tools
 
 | Tool | Description |
 |------|-------------|
-| `wiki_search` | Full-text search across all wiki pages |
-| `wiki_get_page` | Get a page by path or ID, with optional `metadata_only` and `include_render` modes |
-| `wiki_list_pages` | List pages with optional tag filtering and sort order |
-| `wiki_get_tree` | Get the hierarchical folder/page tree structure |
-| `wiki_create_page` | Create a new page |
-| `wiki_update_page` | Update a page via full replacement or surgical find-and-replace (`edits`) |
-| `wiki_move_page` | Move a page to a new path and/or locale |
-| `wiki_delete_page` | Delete a page |
-| `wiki_list_tags` | List all tags used across the wiki |
-| `wiki_get_site_info` | Get wiki site metadata (title, description, host) |
-| `wiki_get_history` | Get page edit history with pagination |
-| `wiki_get_version` | Retrieve a specific historical version of a page |
+| `wiki_search` | Search the pages you may read |
+| `wiki_get_page` | A page by path (preferred) or ID; also past versions (`version_id`) or metadata only |
+| `wiki_list_pages` | List pages with tag filtering and sort order |
+| `wiki_get_tree` | The folder/page tree |
+| `wiki_list_tags` | Tags used on pages you may read |
+| `wiki_get_site_info` | The wiki's URL, default locale and namespacing |
+| `wiki_get_history` | Edit history of a page |
+| `wiki_get_version` | One historical version of a page |
+| `wiki_whoami` | Your name, groups and permissions, also effective permissions on one page |
+| `wiki_create_page`* | Create a page |
+| `wiki_update_page`* | Update a page, by full content or surgical find-and-replace (`edits`) |
+| `wiki_move_page`* | Move a page (needs `manage:pages`) |
+| `wiki_delete_page`* | Delete a page (needs `delete:pages`) |
+
+\* Only with `WIKIJS_MCP_READ_ONLY=false`. Wiki.js still checks each user's rights.
+
+**Rights users need in Wiki.js:**
+- `read:pages` to find pages.
+- **`read:source`** to read page content. Wiki.js's API only returns page content to
+  page managers, so the server reads the page source view, which needs this right.
+- `read:history` for history and versions.
+- `write:pages` to edit.
+
+Give the groups both the permission and a page rule that grants it.
+
+## Deployment (Wiki.js in an LXC container, nginx in front)
+
+This setup runs wikijs-mcp as a systemd service inside the same LXC container as
+Wiki.js, and adds a few locations to the nginx reverse proxy that terminates TLS.
+
+Everything lives in one folder, the git clone itself:
+
+```
+/opt/wikijs-mcp/
+├── .env         settings (root only, mode 600)
+├── .venv/       Python environment
+├── data/        SQLite database (only the service user can write here)
+└── …            the code
+```
+
+`.env`, `.venv/` and `data/` are in `.gitignore`, so `git pull` leaves them alone.
+Never run `git clean -fdx` in this folder: it would delete all three.
+
+### 1. Install in the Wiki.js container
+
+```bash
+apt install python3-venv git pipx
+PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install poetry==1.7.1
+useradd --system --home /nonexistent --shell /usr/sbin/nologin mcp
+git clone <this repository> /opt/wikijs-mcp
+cd /opt/wikijs-mcp
+python3 -m venv .venv
+VIRTUAL_ENV=/opt/wikijs-mcp/.venv poetry install --only main --no-interaction
+install -d -o mcp -g mcp -m 700 data
+```
+
+Python 3.10 or newer is required.
+
+The dependencies are installed from `poetry.lock`, so production runs exactly the
+versions CI tests and audits, with their hashes checked. `VIRTUAL_ENV` makes Poetry
+install into `.venv`, which the systemd unit runs, instead of a venv of its own.
+Poetry runs only during installs and updates and lives in its own venv
+(`/opt/pipx`); the service never uses it. Keep its version equal to the one that
+wrote `poetry.lock` (see the file's first line).
+
+### 2. Configure
+
+```bash
+cd /opt/wikijs-mcp
+install -m 600 .env.example .env
+# Generate the encryption key and put it in WIKIJS_MCP_ENCRYPTION_KEY:
+.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+editor .env
+```
+
+[.env.example](.env.example) documents every setting. The important ones:
+
+- `WIKIJS_URL`: Wiki.js as seen from this container, e.g. `http://127.0.0.1:3000`.
+- `WIKIJS_PUBLIC_URL`: the address users open, e.g. `https://wiki.example.com`.
+- `WIKIJS_STRATEGY_KEY`: the key of your SSO login strategy. Find it under
+  Administration → Authentication, or as the last part of the login button's link
+  (`/login/<key>`).
+- `WIKIJS_MCP_HOST` and `WIKIJS_MCP_FORWARDED_ALLOW_IPS`: the proxy runs in another
+  container, so listen on this container's address and trust forwarded headers only
+  from the proxy's IP.
+- `WIKIJS_TOKEN_RENEWAL`: must equal Administration → Security → Token Renewal
+  Period.
+
+### 3. Run
+
+```bash
+cp /opt/wikijs-mcp/deploy/lxc/wikijs-mcp.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now wikijs-mcp
+journalctl -u wikijs-mcp -f
+```
+
+The unit is hardened: the code and the rest of the system are read-only for the
+service (`ProtectSystem=strict`, only `data/` is writable), it has no capabilities,
+and a syscall filter applies. In an unprivileged LXC container without nesting,
+systemd may fail to set up the sandbox (`status=226/NAMESPACE`). Enable nesting for
+the container, or comment out the `Protect*`/`Private*` lines.
+
+### 4. nginx
+
+Add [deploy/nginx/wikijs-mcp.conf](deploy/nginx/wikijs-mcp.conf) to the proxy:
+- the `upstream` and `limit_req_zone` lines at `http` level
+- the locations inside the wiki's `server` block, **before** `location /`
+
+Then set the upstream address to the Wiki.js container, and run
+`nginx -t && systemctl reload nginx`.
+
+The two `/.well-known/...` locations are required: MCP clients discover the sign-in
+through them. Everything else under `/.well-known` stays with Wiki.js.
+
+### 5. Check
+
+- `https://wiki.example.com/mcp/apps` → the wiki's login → the connected-apps page.
+- `curl -i -X POST https://wiki.example.com/mcp/` → `401` with a `WWW-Authenticate`
+  header.
+
+### Updating
+
+```bash
+cd /opt/wikijs-mcp
+git pull
+VIRTUAL_ENV=/opt/wikijs-mcp/.venv poetry install --only main --no-interaction --sync
+systemctl restart wikijs-mcp
+```
+
+The database schema is upgraded automatically. For backups, back up `.env` and
+`data/` together: the database is useless without the encryption key in `.env`.
+
+## Using it
+
+### Claude Code
+
+```bash
+claude mcp add --transport http wikijs https://wiki.example.com/mcp/
+```
+
+Then run `/mcp` in Claude Code, choose `wikijs` and **Authenticate**: sign in to the
+wiki and allow access.
+
+### claude.ai and Claude Desktop
+
+Add a custom connector with the URL `https://wiki.example.com/mcp/`. The wiki has to
+be reachable from the internet for claude.ai.
+
+### Disconnecting
+
+`https://wiki.example.com/mcp/apps` lists a user's connected apps, each with a
+**Disconnect** button. Deactivating a user in Wiki.js also stops their access at
+once.
+
+## Sessions and lifetimes
+
+- **Wiki session:** the stored Wiki.js session lapses when none of a user's apps is
+  used for longer than the Token Renewal Period (Wiki.js default: 14 days). There is
+  deliberately no background job that keeps it alive.
+- **Sign-in:** at most `WIKIJS_MCP_SESSION_MAX_AGE` (default 30 days) after the last
+  sign-in, users must sign in again, even when they use the server daily. That way
+  your identity provider stays in control (e.g. for removed accounts or MFA).
+- **Signing in again:** when the wiki session lapses, the sign-in is too old, or Wiki.js
+  rejects the session (e.g. a deactivated account), the server answers the app with
+  `401`. The app then runs the sign-in again by itself. In Claude Code: `/mcp` →
+  re-authenticate.
+- **Tokens:** OAuth access tokens last 1 hour, and refresh tokens rotate on every use.
+  A refresh token used twice disconnects that app: it may have been stolen.
+- **Logging out of the wiki** does not disconnect apps. Disconnect them on `/mcp/apps`.
+
+## Security notes
+
+- **Encryption:** stored Wiki.js sessions are encrypted with `WIKIJS_MCP_ENCRYPTION_KEY`.
+  This mainly protects a **leaked copy of the database** (e.g. a backup). Someone with
+  access to the running container also has the key.
+- **What the server holds:** a Wiki.js session of every connected user, with all of
+  that user's rights, administrators included. Protect the container as well as the
+  wiki itself.
+- **Hashing:** access tokens, refresh tokens, authorization codes and web session ids are
+  stored only as SHA-256 hashes.
+- **Logs:** they never contain tokens, Wiki.js sessions or page content. Each tool
+  call writes one audit line to the `wikijs_mcp.audit` logger (user, tool, path or
+  search term, outcome). These lines hold e-mail addresses and search terms, so they
+  are personal data: limit how long the journal keeps them (e.g. `MaxRetentionSec=`
+  in `journald.conf`).
+- **Sign-in:**
+  - The login state is single-use and bound to the browser.
+  - Only a Wiki.js session issued during that very sign-in is accepted, so an old wiki
+    cookie cannot bypass the identity provider.
+  - Redirects after sign-in stay under `/mcp/`.
+- **Web pages:** the sign-in, consent and apps pages use CSRF tokens, origin checks, a strict
+  Content Security Policy and `Cache-Control: no-store`.
+- **OAuth:**
+  - Registration is open (as MCP clients expect).
+  - Redirect URIs must be `https`, or `http` on a loopback address, without user info
+    (`https://claude.ai@evil.example/` is refused).
+  - Every authorization needs the user's explicit consent. The consent page shows the
+    real host the app redirects to, and the app's name as the app chose it: anyone can
+    register an app called "Claude".
+  - Allowing an app needs a click: browsers that send Fetch Metadata headers (all current
+    major browsers) refuse a consent posted by a script.
+- **Same origin as the wiki:** the MCP pages must share the wiki's host name, because
+  sign-in takes over the Wiki.js login cookie. A script injected into a wiki page (XSS)
+  could therefore act on these pages too. Keep Wiki.js's HTML sanitization on
+  (Administration → Rendering → HTML → Security), and be careful with who may add
+  scripts to pages.
+- **Write tools and prompt injection:** page content goes to the AI model as it is. A
+  page can contain instructions aimed at the model, e.g. to change or delete other
+  pages. With `WIKIJS_MCP_READ_ONLY=true` (the default) the tools cannot change
+  anything; enable write tools only if you accept that risk, and let users review the
+  changes their app proposes.
+- **Page paths:** paths and locales from tool calls cannot leave the source view
+  (`..` is refused), so a user's session is only sent to the URLs the tools need.
+- **Leaks in Wiki.js:**
+  - Wiki.js does not filter search totals and suggestions by permission. The server
+    never requests them.
+  - Wiki.js answers differently for page IDs that do not exist. The server checks IDs
+    against the pages the user may see before asking Wiki.js.
+
+## Known limitations
+
+- Wiki.js 2.5 only.
+- Updating a page through MCP clears its publish window (start and end date) unless
+  the user has `manage:pages` on that page. Pages with custom CSS/JS can only be
+  updated by such users, because Wiki.js would otherwise erase that CSS/JS.
+- The `db` search engine only searches titles and descriptions. The `postgres` engine
+  also searches content.
 
 ## Development
 
 ```bash
-git clone https://github.com/jaalbin24/wikijs-mcp.git
-cd wikijs-mcp
 poetry install
 poetry run pytest
 ```
+
+A local Wiki.js 2.5 with test users, and nginx in front, as in production:
+
+```bash
+docker compose -f deploy/dev/docker-compose.yml up -d
+.venv/bin/python scripts/spike_setup.py   # test groups, users, pages -> scripts/.env.spike
+```
+
+Run the server with `WIKIJS_URL=http://127.0.0.1:3080`,
+`WIKIJS_PUBLIC_URL=http://127.0.0.1:3090`, `WIKIJS_STRATEGY_KEY=local`,
+`WIKIJS_MCP_PORT=8765` (plus a database path and key). Then connect a client to
+`http://127.0.0.1:3090/mcp/` (the repository's `.mcp.json` does this for Claude
+Code), and sign in with a test account using the local login.
+
+`wikijs-mcp stdio --dev-jwt-file <file>` runs over stdio as one user, without OAuth.
+
+[FASE0-RESULTATEN.md](FASE0-RESULTATEN.md) records how Wiki.js 2.5 behaves; the
+server's design rests on it.
 
 ## License
 

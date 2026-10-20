@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
+from tests.helpers import make_jwt, make_response
 from wikijs_mcp.client import WikiJSClient
 from wikijs_mcp.config import WikiJSConfig
 
@@ -15,10 +16,10 @@ class TestGraphQLCompatibility:
 
     async def test_list_pages_no_offset_parameter(self, mock_wiki_config):
         """Test that list_pages doesn't send offset parameter to API."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
         # Mock successful response
-        mock_response = Mock()
+        mock_response = Mock(status_code=200, is_error=False, headers={}, cookies={})
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "data": {"pages": {"list": [{"id": 1, "title": "Test", "path": "/test"}]}}
@@ -43,9 +44,9 @@ class TestGraphQLCompatibility:
 
     async def test_list_pages_query_structure(self, mock_wiki_config):
         """Test the exact GraphQL query structure for list_pages."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
-        mock_response = Mock()
+        mock_response = Mock(status_code=200, is_error=False, headers={}, cookies={})
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {"data": {"pages": {"list": []}}}
 
@@ -59,7 +60,7 @@ class TestGraphQLCompatibility:
 
         # Verify query structure
         assert "query ListPages(" in query
-        assert "$limit: Int!" in query
+        assert "$limit: Int," in query
         assert "list(" in query
         assert "limit: $limit" in query
         assert "author" not in query  # No author field
@@ -67,7 +68,7 @@ class TestGraphQLCompatibility:
 
     async def test_list_pages_response_without_author(self, mock_wiki_config):
         """Test that list_pages handles responses without author field."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
         # Response without author field (as Wiki.js actually returns)
         pages_response = {
@@ -97,38 +98,32 @@ class TestGraphQLCompatibility:
 
     async def test_handle_wikijs_graphql_errors(self, mock_wiki_config):
         """Test handling of Wiki.js specific GraphQL errors."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
         # Simulate the exact error we got from Wiki.js
-        error_response = Mock()
-        error_response.raise_for_status.return_value = None
-        error_response.status_code = 400
-        error_response.text = '{"errors":[{"message":"Unknown argument \\"offset\\" on field \\"PageQuery.list\\"."}]}'
-        error_response.json.return_value = {
-            "errors": [
-                {
-                    "message": 'Unknown argument "offset" on field "PageQuery.list".',
-                    "locations": [{"line": 4, "column": 37}],
-                    "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"},
-                }
-            ]
-        }
-
-        # Create HTTPStatusError
-        http_error = httpx.HTTPStatusError(
-            "400 Bad Request", request=Mock(), response=error_response
+        error_response = make_response(
+            {
+                "errors": [
+                    {
+                        "message": 'Unknown argument "offset" on field "PageQuery.list".',
+                        "locations": [{"line": 4, "column": 37}],
+                        "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"},
+                    }
+                ]
+            },
+            status_code=400,
         )
 
-        client.client.post = AsyncMock(side_effect=http_error)
+        client.client.post = AsyncMock(return_value=error_response)
 
         with pytest.raises(Exception, match="API request failed: 400"):
             await client._execute_query("invalid query", {"offset": 0})
 
     async def test_search_pages_query_compatibility(self, mock_wiki_config):
         """Test search_pages query is compatible with Wiki.js."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
-        mock_response = Mock()
+        mock_response = Mock(status_code=200, is_error=False, headers={}, cookies={})
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "data": {"pages": {"search": {"results": []}}}
@@ -142,18 +137,15 @@ class TestGraphQLCompatibility:
         call_args = client.client.post.call_args
         query = call_args[1]["json"]["query"]
 
-        assert (
-            "query SearchPages($query: String!, $path: String, $locale: String)"
-            in query
-        )
-        assert "search(query: $query, path: $path, locale: $locale)" in query
+        assert "query SearchPages($query: String!, $locale: String)" in query
+        assert "search(query: $query, locale: $locale)" in query
 
     async def test_get_page_tree_compatibility(self, mock_wiki_config):
         """Test get_page_tree with correct GraphQL schema."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
         # Mock tree response matching the actual schema
-        mock_response = Mock()
+        mock_response = Mock(status_code=200, is_error=False, headers={}, cookies={})
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
             "data": {
@@ -209,9 +201,9 @@ class TestGraphQLCompatibility:
         self, mock_wiki_config, field_list, should_contain, should_not_contain
     ):
         """Test that GraphQL queries only request fields that exist in Wiki.js schema."""
-        client = WikiJSClient(mock_wiki_config)
+        client = WikiJSClient(mock_wiki_config, make_jwt())
 
-        mock_response = Mock()
+        mock_response = Mock(status_code=200, is_error=False, headers={}, cookies={})
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {"data": {"pages": {"list": []}}}
 
