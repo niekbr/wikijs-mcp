@@ -135,10 +135,16 @@ class TestSetup:
 
         assert {tool.name for tool in tools} == READ_TOOLS | WRITE_TOOLS
 
-    async def test_delete_is_marked_destructive(self, write_server):
+    async def test_tool_annotations(self, write_server):
         tools = {tool.name: tool for tool in await write_server.app.list_tools()}
 
-        assert tools["wiki_delete_page"].annotations.destructiveHint is True
+        for name in READ_TOOLS:
+            assert tools[name].annotations.readOnlyHint is True
+        for name in WRITE_TOOLS:
+            assert tools[name].annotations.readOnlyHint is False
+        assert tools["wiki_create_page"].annotations.destructiveHint is False
+        for name in ("wiki_update_page", "wiki_delete_page", "wiki_move_page"):
+            assert tools[name].annotations.destructiveHint is True
 
     def test_instructions(self, server, write_server):
         instructions = server.app.instructions

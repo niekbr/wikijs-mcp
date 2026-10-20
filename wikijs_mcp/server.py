@@ -204,7 +204,8 @@ class WikiJSMCPServer:
         config = self.config
 
         @self.app.tool(
-            description="Full-text search across the wiki pages the user may read. Returns titles, paths, locales and descriptions. Use this when you know keywords but not the page location."
+            description="Full-text search across the wiki pages the user may read. Returns titles, paths, locales and descriptions. Use this when you know keywords but not the page location.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_search(
             query: str, limit: int = 10, locale: str | None = None
@@ -234,7 +235,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Retrieve a single wiki page by its path (preferred) or numeric ID. Returns content plus metadata (title, tags, content type, dates). Set metadata_only=True to skip content and save context tokens. Set version_id (from wiki_get_history) to read a past version. Reading content requires the read:source permission."
+            description="Retrieve a single wiki page by its path (preferred) or numeric ID. Returns content plus metadata (title, tags, content type, dates). Set metadata_only=True to skip content and save context tokens. Set version_id (from wiki_get_history) to read a past version. Reading content requires the read:source permission.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_get_page(
             path: str | None = None,
@@ -292,7 +294,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="List the wiki pages the user may read, with optional tag filtering and sort order. Returns page metadata (including tags and content type) without content. Supports filtering by tags (AND logic) and ordering by CREATED, ID, PATH, TITLE, or UPDATED."
+            description="List the wiki pages the user may read, with optional tag filtering and sort order. Returns page metadata (including tags and content type) without content. Supports filtering by tags (AND logic) and ordering by CREATED, ID, PATH, TITLE, or UPDATED.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_list_pages(
             limit: int = 50,
@@ -347,7 +350,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Get the hierarchical folder/page tree structure starting from a given path. Use this instead of list_pages when you need to understand how pages are organized in folders. Returns depth-indented entries showing folders and pages."
+            description="Get the hierarchical folder/page tree structure starting from a given path. Use this instead of list_pages when you need to understand how pages are organized in folders. Returns depth-indented entries showing folders and pages.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_get_tree(
             parent_path: str = "",
@@ -381,7 +385,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="List the tags used on wiki pages the user may read. Use this to discover available tags before filtering wiki_list_pages by tag."
+            description="List the tags used on wiki pages the user may read. Use this to discover available tags before filtering wiki_list_pages by tag.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_list_tags() -> str:
             """List all tags."""
@@ -398,7 +403,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Get Wiki.js site information: the wiki's URL, its default locale and multilingual namespacing. Useful to know which locale page operations should use."
+            description="Get Wiki.js site information: the wiki's URL, its default locale and multilingual namespacing. Useful to know which locale page operations should use.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_get_site_info() -> str:
             """Get site and localization settings."""
@@ -420,7 +426,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Get the edit history of a wiki page by path (preferred) or ID. Returns versions with timestamps, authors, and change types. Requires the read:history permission. Supports pagination via offset_page and offset_size."
+            description="Get the edit history of a wiki page by path (preferred) or ID. Returns versions with timestamps, authors, and change types. Requires the read:history permission. Supports pagination via offset_page and offset_size.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_get_history(
             path: str | None = None,
@@ -464,7 +471,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Retrieve a specific historical version of a wiki page, by page path (preferred) or ID plus a version ID from wiki_get_history. Returns the content and metadata as they were then. Requires the read:history permission."
+            description="Retrieve a specific historical version of a wiki page, by page path (preferred) or ID plus a version ID from wiki_get_history. Returns the content and metadata as they were then. Requires the read:history permission.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_get_version(
             version_id: int,
@@ -509,7 +517,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Show who you are acting as in the wiki: name, email, groups and global permissions. Pass a page path to also see the effective permissions on that page (read, write, source, history, ...)."
+            description="Show who you are acting as in the wiki: name, email, groups and global permissions. Pass a page path to also see the effective permissions on that page (read, write, source, history, ...).",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
         async def wiki_whoami(
             path: str | None = None, locale: str | None = None
@@ -566,7 +575,8 @@ class WikiJSMCPServer:
         """Tools that change pages; only registered when not read-only."""
 
         @self.app.tool(
-            description="Create a new wiki page at the specified path. Content should match the wiki's editor format (usually markdown). When locale is omitted, the site's default locale is used. The page path determines its location in the wiki hierarchy (e.g., 'team/onboarding' creates under 'team')."
+            description="Create a new wiki page at the specified path. Content should match the wiki's editor format (usually markdown). When locale is omitted, the site's default locale is used. The page path determines its location in the wiki hierarchy (e.g., 'team/onboarding' creates under 'team').",
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
         )
         async def wiki_create_page(
             path: str,
@@ -610,7 +620,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Update an existing wiki page by path (preferred) or ID. Supports two content-editing modes: (1) full replacement via 'content', or (2) surgical find-and-replace via 'edits' — a list of {old_text, new_text} pairs applied sequentially. Prefer 'edits' for small, targeted changes. Title, description, and tags can also be updated independently; everything not given is kept."
+            description="Update an existing wiki page by path (preferred) or ID. Supports two content-editing modes: (1) full replacement via 'content', or (2) surgical find-and-replace via 'edits' — a list of {old_text, new_text} pairs applied sequentially. Prefer 'edits' for small, targeted changes. Title, description, and tags can also be updated independently; everything not given is kept.",
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
         )
         async def wiki_update_page(
             path: str | None = None,
@@ -729,7 +740,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Move a wiki page to a new path and/or locale, by path (preferred) or ID. The page keeps its numeric ID. Requires the manage:pages permission on the source and destination."
+            description="Move a wiki page to a new path and/or locale, by path (preferred) or ID. The page keeps its numeric ID. Requires the manage:pages permission on the source and destination.",
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
         )
         async def wiki_move_page(
             destination_path: str,
