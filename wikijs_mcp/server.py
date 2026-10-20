@@ -19,6 +19,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 from starlette.applications import Starlette
 
 from . import wiki_jwt
@@ -700,7 +701,8 @@ class WikiJSMCPServer:
             return response
 
         @self.app.tool(
-            description="Permanently delete a wiki page by path (preferred) or ID. This action cannot be undone. Requires the delete:pages permission."
+            description="Permanently delete a wiki page by path (preferred) or ID. This action cannot be undone. Requires the delete:pages permission.",
+            annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
         )
         async def wiki_delete_page(
             path: str | None = None, id: int | None = None, locale: str | None = None
